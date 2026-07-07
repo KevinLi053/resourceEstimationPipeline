@@ -18,7 +18,7 @@ from typing import List, Optional
 import h5py
 from qiskit.quantum_info import SparsePauliOp
 
-from resourceEstimationPipeline.config import HamlibConfig
+from ..config import HamlibConfig
 
 
 # ---------------------------------------------------------------------------

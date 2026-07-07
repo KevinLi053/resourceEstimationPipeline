@@ -1,7 +1,7 @@
 """
 Table rendering for comparison reports.
 
-Converts :class:`~resourceEstimationPipeline.compare.metrics.ComparisonReport`
+Converts :class:`~compare.metrics.ComparisonReport`
 objects into pandas DataFrames and rich text output.
 
 Public API
@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from resourceEstimationPipeline.compare.metrics import ComparisonReport, MetricComparison
+from .metrics import ComparisonReport, MetricComparison
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +51,11 @@ def comparison_dataframe(report: ComparisonReport):
         rows.append(row)
 
     df = pd.DataFrame(rows)
+    # Rows where ratio is not applicable (non-numeric or one side missing) have no
+    # "Ratio (B/A)" key in their dict, so pandas fills those cells with NaN.
+    # Replace with "—" so the column stays all-string.
+    if "Ratio (B/A)" in df.columns:
+        df["Ratio (B/A)"] = df["Ratio (B/A)"].fillna("—")
     # Put Metric first
     cols = ["Metric"] + [c for c in df.columns if c != "Metric"]
     return df[cols]

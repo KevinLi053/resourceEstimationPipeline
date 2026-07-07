@@ -198,7 +198,7 @@ class QualtranConfig:
     """
 
     # Decomposition / estimation precision
-    use_gidney_fowler: bool = False
+    use_gidney_fowler: bool = True
     """
     If True, use the Gidney-Fowler CCZ2T factory model.
     If False, construct a custom PhysicalCostModel from `phys_err` and `cycle_time_us`.

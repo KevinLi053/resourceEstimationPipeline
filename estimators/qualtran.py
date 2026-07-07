@@ -6,7 +6,21 @@ Reuses implementations from:
   - estimator/analysis/hamlib.ipynb                  (qiskit_to_composite_bloq)
 
 The public entry point is :func:`estimate`, which satisfies the
-:class:`~resourceEstimationPipeline.estimators.base.Estimator` protocol.
+:class:`~estimators.base.Estimator` protocol.
+
+Notes on metric availability
+-----------------------------
+CompositeBloq schedules gates in a data-flow graph rather than a time-ordered
+layer sequence, so T-depth and logical-depth (layer depth) are not directly
+computable without explicit circuit scheduling — those fields remain None.
+
+Logical cycles are derived from duration_hr and cycle_time_us:
+    logical_cycles = duration_hr * 3_600 * 1_000_000 / cycle_time_us
+This is exact when duration_hr is computed as (n_cycles * cycle_time_us / 1e6 / 3600).
+
+error_budget is not a direct Qualtran input; the estimator accepts code distance
+and computes the logical error rate from it.  The resulting logical_error_rate
+is stored but error_budget remains None (no input budget was specified).
 """
 from __future__ import annotations
 
@@ -15,8 +29,9 @@ from typing import Any, List, Optional, Tuple
 
 from qiskit import QuantumCircuit
 
-from resourceEstimationPipeline.config import PipelineConfig, QualtranConfig
-from resourceEstimationPipeline.estimators.base import EstimationResult
+from ..config import PipelineConfig, QualtranConfig
+from ..circuit.transpile import compute_t_depth
+from .base import EstimationResult
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +205,7 @@ def _make_cost_model(cfg: QualtranConfig):
 
     if cfg.use_beverland and cfg.phys_err == 1e-3:
         return PhysicalCostModel.make_beverland_et_al(data_d=cfg.data_d)
-    
+
     # Custom hardware profile (varies phys_err, cycle_time_us, and factory_type)
     from qualtran.surface_code import (
         PhysicalParameters, QECScheme, SimpleDataBlock,
@@ -278,6 +293,78 @@ def compute_total_t_count(algo, error_budget: float = 1e-3) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Factory statistics extraction
+# ---------------------------------------------------------------------------
+
+def _extract_factory_stats(model) -> dict:
+    """
+    Extract as many factory statistics as the factory object exposes.
+
+    Returns a dict with keys present only when the attribute exists.
+    All values are stored in `extra` for diagnostics.
+    """
+    stats: dict = {}
+    factory = getattr(model, "factory", None)
+    if factory is None:
+        return stats
+
+    stats["factory_class"] = type(factory).__name__
+
+    # n_physical_qubits: already used for physical_factory_qubits
+    for attr in ("n_physical_qubits", "n_phys_qubits", "num_physical_qubits",
+                 "physical_qubits"):
+        try:
+            v = getattr(factory, attr, None)
+            if v is not None:
+                stats["n_physical_qubits"] = int(v)
+                break
+        except Exception:
+            pass
+
+    # Number of T states produced per distillation round (factory throughput)
+    for attr in ("n_t_states_per_run", "n_magic_states_per_round", "n_states_per_run"):
+        try:
+            val = getattr(factory, attr)
+            if val is not None:
+                stats["t_states_per_round"] = int(val)
+                break
+        except Exception:
+            pass
+
+    # Output error rate per T state
+    for attr in ("t_gate_error_rate", "distillation_error", "output_error"):
+        try:
+            val = getattr(factory, attr)
+            if val is not None:
+                stats["t_state_error_rate"] = float(val)
+                break
+        except Exception:
+            pass
+
+    # Number of distillation rounds / levels
+    for attr in ("n_rounds", "n_distillation_rounds", "distillation_rounds"):
+        try:
+            val = getattr(factory, attr)
+            if val is not None:
+                stats["distillation_rounds"] = int(val)
+                break
+        except Exception:
+            pass
+
+    # Distillation time (in cycles)
+    for attr in ("distillation_time_steps", "n_cycles"):
+        try:
+            val = getattr(factory, attr)
+            if val is not None:
+                stats["distillation_time_steps"] = int(val)
+                break
+        except Exception:
+            pass
+
+    return stats
+
+
+# ---------------------------------------------------------------------------
 # Public estimator function
 # ---------------------------------------------------------------------------
 
@@ -336,16 +423,23 @@ def estimate(
     error = best["error"]
     data_d = best["data_d"]
 
-    # Phys qubit breakdown from the model (factory vs data block)
+    # 4. Phys qubit breakdown from the model (factory vs data block)
+    # Try multiple attribute names because Qualtran's API has changed across versions.
     factory_qubits: Optional[int] = None
     compute_qubits: Optional[int] = None
-    try:
-        factory_qubits = int(model.factory.n_physical_qubits)
-        compute_qubits = phys_qubits - factory_qubits
-    except Exception:
-        pass
+    if model is not None and model.factory is not None:
+        for _attr in ("n_physical_qubits", "n_phys_qubits", "num_physical_qubits",
+                      "physical_qubits"):
+            try:
+                v = getattr(model.factory, _attr, None)
+                if v is not None:
+                    factory_qubits = int(v)
+                    compute_qubits = phys_qubits - factory_qubits
+                    break
+            except Exception:
+                pass
 
-    # T count (including Rz synthesis)
+    # 5. T count (including Rz synthesis)
     t_exact = int(gc.t) + 4 * int(gc.toffoli) + 4 * int(gc.and_bloq)
     t_total = compute_total_t_count(algo, error_budget=qt_cfg.rz_eps)
     t_per_rz_estimate = (
@@ -353,11 +447,37 @@ def estimate(
         if int(gc.rotation) > 0 else None
     )
 
+    # 6. Logical cycles
+    # Derived from duration_hr and cycle_time_us.
+    # Exact when duration_hr = n_cycles * cycle_time_us / 1e6 / 3600.
+    logical_cycles: Optional[int] = None
+    if not math.isnan(duration_hr) and qt_cfg.cycle_time_us > 0:
+        logical_cycles = int(round(duration_hr * 3600 * 1e6 / qt_cfg.cycle_time_us))
+
+    # 7. Circuit-derived T depth (DAG layer analysis on the input Clifford+T circuit).
+    # CompositeBloq has no time ordering, so T depth is not available from Qualtran's
+    # own model.  We compute it directly from the transpiled circuit instead.
+    circuit_t_depth = compute_t_depth(circuit)  # derived: T-gate layer count
+
+    # 8. Factory statistics (best-effort; attributes vary across Qualtran versions)
+    factory_stats = _extract_factory_stats(model)
+
+    # 9. Factory description string
+    # Include the class name and physical qubit count for the config column.
+    factory_count_str = qt_cfg.factory_type
+    if factory_qubits is not None:
+        factory_count_str = f"{qt_cfg.factory_type} ({factory_qubits:,} qubits)"
+
     return EstimationResult(
         estimator_name=f"Qualtran (d={data_d}, p={qt_cfg.phys_err:.0e})",
         logical_qubits=algo.n_algo_qubits,
+        # Logical depth requires explicit circuit scheduling;
+        # CompositeBloq uses a data-flow graph (no time ordering) — not available.
+        logical_depth=None,
+        logical_cycles=logical_cycles,
         t_count=t_total,
-        t_depth=None,          # CompositeBloq does not compute T-depth directly
+        # T depth derived from the transpiled input circuit (DAG layer analysis).
+        t_depth=circuit_t_depth,
         clifford_count=int(gc.clifford),
         rotation_count=int(gc.rotation),
         toffoli_count=int(gc.toffoli),
@@ -365,13 +485,23 @@ def estimate(
         physical_qubits=phys_qubits,
         physical_compute_qubits=compute_qubits,
         physical_factory_qubits=factory_qubits,
+        # Qualtran's SimpleDataBlock does not split memory from compute.
         physical_memory_qubits=None,
         runtime_seconds=duration_hr * 3600,
-        error_budget=None,     # Qualtran takes code distance, not error budget directly
+        # error_budget is not a Qualtran input; it takes code distance and
+        # computes logical error rate from the QEC model.
+        error_budget=None,
         logical_error_rate=float(error),
         code_distance=data_d,
-        factory_count=qt_cfg.factory_type,
+        factory_type=qt_cfg.factory_type,
+        factory_count=factory_count_str,
         t_per_rotation=t_per_rz_estimate,
+        rotation_synthesis_precision=qt_cfg.rz_eps,
+        physical_error_rate=qt_cfg.phys_err,
+        cycle_time_us=qt_cfg.cycle_time_us,
+        # Qualtran uses cycle_time_us, not gate_time_ns / measurement_time_ns.
+        gate_time_ns=None,
+        measurement_time_ns=None,
         algorithm_assumptions=(
             f"Clifford+T circuit; basis={config.transpile.basis_gates}; "
             f"rz_eps={qt_cfg.rz_eps:.0e}; "
@@ -387,8 +517,8 @@ def estimate(
         raw=algo,
         extra={
             "algo_summary": {
-                "t_exact":       t_exact,
-                "t_total":       t_total,
+                "t_exact":        t_exact,
+                "t_total":        t_total,
                 "rotation_count": int(gc.rotation),
                 "clifford_count": int(gc.clifford),
                 "toffoli_count":  int(gc.toffoli),
@@ -396,6 +526,7 @@ def estimate(
                 "measurement":    int(gc.measurement),
                 "n_algo_qubits":  algo.n_algo_qubits,
             },
+            "factory_stats": factory_stats,
             "all_pareto_rows": [
                 {k: v for k, v in r.items() if k != "model"} for r in valid_rows
             ],

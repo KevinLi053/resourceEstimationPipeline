@@ -27,7 +27,7 @@ from typing import Any, Dict, Optional
 from qiskit import QuantumCircuit, transpile
 from qiskit.qasm3 import Exporter
 
-from resourceEstimationPipeline.config import TranspileConfig
+from ..config import TranspileConfig
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +93,26 @@ def circuit_to_qasm(circuit: QuantumCircuit) -> str:
 # Utility: gate-count summary
 # ---------------------------------------------------------------------------
 
+def compute_t_depth(circuit: QuantumCircuit) -> int:
+    """
+    Compute T-gate depth using Qiskit DAG layer analysis.
+
+    Returns the number of circuit layers that contain at least one T or
+    T-dagger gate (i.e., the T-gate critical-path depth).  This is a
+    property of the transpiled Clifford+T circuit and is independent of
+    the downstream estimator.
+    """
+    from qiskit.converters import circuit_to_dag
+
+    dag = circuit_to_dag(circuit)
+    t_gate_names = {"t", "tdg"}
+    return sum(
+        1
+        for layer in dag.layers()
+        if any(node.op.name in t_gate_names for node in layer["graph"].op_nodes())
+    )
+
+
 def circuit_stats(circuit: QuantumCircuit) -> Dict[str, Any]:
     """
     Return a summary dictionary of circuit statistics.
@@ -104,7 +124,8 @@ def circuit_stats(circuit: QuantumCircuit) -> Dict[str, Any]:
     Returns
     -------
     dict with keys:
-      num_qubits, depth, total_gates, gate_counts (dict), t_count, clifford_count
+      num_qubits, depth, t_depth, total_gates, gate_counts (dict),
+      t_count, clifford_count, rz_count
     """
     ops = dict(circuit.count_ops())
     t_gates = {"t", "tdg"}
@@ -115,6 +136,7 @@ def circuit_stats(circuit: QuantumCircuit) -> Dict[str, Any]:
     return {
         "num_qubits": circuit.num_qubits,
         "depth": circuit.depth(),
+        "t_depth": compute_t_depth(circuit),
         "total_gates": sum(ops.values()),
         "gate_counts": ops,
         "t_count": t_count,
