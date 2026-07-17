@@ -122,15 +122,16 @@ python-json-logger==4.1.0
 PyYAML==6.0.3
 pyzmq==27.1.0
 pyzx==0.10.4
-qdk==1.29.1
+qdk==1.30.0
 qiskit==2.5.0
 qref==0.11.0
-qsharp==1.29.1
+qsharp==1.30.0
 qsharp-widgets==1.29.1
 qualtran==0.7.0
 quimb==1.14.0
 referencing==0.37.0
 requests==2.34.2
+-e git+https://github.com/KevinLi053/resourceEstimationPipeline.git@be585b32a4a968851eb2087be66aaf78c5ddaad9#egg=resourceEstimationPipeline
 retrying==1.4.2
 rfc3339-validator==0.1.4
 rfc3986-validator==0.1.1

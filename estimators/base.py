@@ -96,12 +96,34 @@ class EstimationResult:
     code_distance: Optional[int] = None
     """Surface-code data-block distance."""
 
+    logical_cycle_time_ns: Optional[int] = None
+    """
+    Time for one logical QEC cycle in nanoseconds (d syndrome-extraction rounds).
+    Azure: from the LATTICE_SURGERY instruction time (= d × code_cycle_time_ns).
+    Qualtran: derivable as code_distance × cycle_time_us × 1000.
+    """
+
+    code_cycle_time_ns: Optional[int] = None
+    """
+    Time for one syndrome extraction cycle in nanoseconds.
+    Azure: from the CODE_CYCLE_TIME property on the LATTICE_SURGERY instruction.
+    Not directly available from Qualtran (Qualtran uses cycle_time_us instead).
+    """
+
     # ── Factory ──────────────────────────────────────────────────────────────
     factory_type: Optional[str] = None
     """Magic-state factory model name, e.g. 'Litinski19', 'CCZ2T'."""
 
     factory_count: Optional[str] = None
     """Description of the magic-state factory configuration, e.g. '4×T'."""
+
+    num_factories: Optional[int] = None
+    """
+    Number of parallel magic-state factories.
+    Azure: NUM_TFACTORIES chosen by the optimizer.
+    Qualtran: 1 (default single-factory model) or n_factories from QualtranConfig.
+    total_physical_factory_qubits = num_factories × qubits_per_factory.
+    """
 
     # ── Rotation synthesis ───────────────────────────────────────────────────
     t_per_rotation: Optional[int] = None
@@ -212,10 +234,13 @@ class EstimationResult:
             "Error budget": self.error_budget,
             "Logical error rate": self.logical_error_rate,
             "Code distance": self.code_distance,
+            "Logical cycle time (ns)": self.logical_cycle_time_ns,
+            "Code cycle time (ns)": self.code_cycle_time_ns,
 
             # ── Factory ───────────────────────────────────────────────────────
             "Factory type": self.factory_type,
             "Factory config": self.factory_count,
+            "Number of factories": self.num_factories,
 
             # ── Rotation synthesis ────────────────────────────────────────────
             "T gates per rotation": self.t_per_rotation,

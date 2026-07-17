@@ -45,13 +45,15 @@ _TOL = 1e-12
 
 def _rz_to_bloqs(angle: float, eps: float = 1e-11) -> list:
     """
-    Classify Rz(angle) into exact Qualtran basic gate(s) where possible.
+    Classify Rz(angle) for Qualtran synthesis purposes.
 
-    Source: qualtranCircuitBuilder.ipynb — cell-bloq-helpers.
+    Returns ``[Rz(angle, eps)]`` so the rotation remains in the bloq graph and
+    can be synthesized by Qualtran's resource estimator (rather than being
+    pre-decomposed into T-gates).
 
-    Special angles (multiples of π/4) map to exact Clifford/T gates —
-    no synthesis overhead is incurred.  All other angles map to
-    ``Rz(angle, eps)`` — one arbitrary rotation each.
+    Special angles that are exact Clifford operations (π/2, π, etc.) return
+    their exact gates to avoid unnecessary synthesis overhead.  Exact zeros
+    return an empty list (identity — no bloq needed).
 
     Angle convention: Rz(θ) = exp(-iθ/2 · Z).
 
@@ -86,6 +88,7 @@ def _rz_to_bloqs(angle: float, eps: float = 1e-11) -> list:
         return [SGate(), TGate()]
     if abs(angle + 3 * math.pi / 4) < _TOL:
         return [SGate(is_adjoint=True), TGate(is_adjoint=True)]
+    # All other angles → keep as an Rz bloq for Qualtran to synthesize.
     return [Rz(angle, eps=eps)]
 
 
@@ -97,17 +100,28 @@ def _rz_to_bloqs(angle: float, eps: float = 1e-11) -> list:
 
 def qiskit_to_composite_bloq(circuit: QuantumCircuit, eps: float = 1e-11):
     """
-    Convert a Qiskit circuit in the Clifford+T basis to a Qualtran CompositeBloq.
+    Convert a Qiskit circuit to a Qualtran CompositeBloq.
 
     Source: qualtranCircuitBuilder.ipynb — cell-bloq-helpers and cell-build-bloq.
+
+    Rotation gates (Rz, Rx, Ry) are added as Qualtran bloqs so that
+    Qualtran's resource estimator can synthesize them natively (e.g. into
+    T-gates) during estimation.  This supports the workflow where
+    ``rotation_synthesis_enabled=False`` is set in the transpilation config,
+    allowing pre-synthesis to be skipped and letting Qualtran handle rotation
+    synthesis with its own algorithms.
+
+    Special Rz angles (multiples of π/4) are recognised as exact Clifford/T
+    gates — no synthesis overhead is incurred for those.  Arbitrary angles
+    become ``Rz(angle, eps)`` bloqs preserved for Qualtran's estimator.
 
     One named 1-qubit register per qubit (q0, q1, …) so the data-flow
     graph tracks each wire independently.
 
     Parameters
     ----------
-    circuit : QuantumCircuit  (must be in CANONICAL_BASIS_GATES or QUALTRAN_EXTENDED_BASIS)
-    eps     : float  synthesis precision for arbitrary Rz gates
+    circuit : QuantumCircuit  (may contain arbitrary rotation gates Rz/Rx/Ry)
+    eps     : float  synthesis precision for arbitrary rotation bloqs
 
     Returns
     -------
@@ -115,7 +129,7 @@ def qiskit_to_composite_bloq(circuit: QuantumCircuit, eps: float = 1e-11):
     """
     from qualtran import BloqBuilder
     from qualtran.bloqs.basic_gates import (
-        CNOT, CZ, Hadamard, MeasureZ, SGate, TGate, Toffoli,
+        CNOT, CZ, Hadamard, MeasureZ, Rx, Rz, Ry, SGate, TGate, Toffoli,
         TwoBitSwap, XGate, YGate, ZGate,
     )
 
@@ -133,7 +147,17 @@ def qiskit_to_composite_bloq(circuit: QuantumCircuit, eps: float = 1e-11):
         "ccx":   Toffoli(),
         "swap":  TwoBitSwap(),
         "measure": MeasureZ(),
+        # Rotation gates — stored as None so they are instantiated per
+        # instruction angle below.  Keeping them as Rz/Rx/Ry bloqs lets
+        # Qualtran's resource estimator synthesize them natively (e.g. into
+        # T-gates) during estimation rather than requiring pre-synthesis in
+        # the transpilation stage.
+        "rz":    None,
+        "rx":    None,
+        "ry":    None,
     }
+
+    _ROTATION_BLOQS = {"rz": Rz, "rx": Rx, "ry": Ry}
     _IGNORED = {"barrier", "reset", "id", "measure"}
 
     n = circuit.num_qubits
@@ -147,10 +171,22 @@ def qiskit_to_composite_bloq(circuit: QuantumCircuit, eps: float = 1e-11):
 
         idx = [circuit.find_bit(q).index for q in instruction.qubits]
 
-        if name == "rz":
+        if name in _ROTATION_BLOQS:
             angle = instruction.operation.params[0]
-            for bloq in _rz_to_bloqs(angle, eps=eps):
-                qs[idx[0]] = bb.add(bloq, q=qs[idx[0]])
+            bloq_cls = _ROTATION_BLOQS[name]
+            # For Rx/Ry: add the rotation bloq directly (no special-angle
+            # classification needed — let Qualtran's estimator handle them).
+            if name in ("rx", "ry"):
+                qs[idx[0]] = bb.add(bloq_cls(angle, eps=eps), q=qs[idx[0]])
+            else:
+                # Rz: use _rz_to_bloqs to skip exact Clifford gates (e.g. T, S, Z)
+                # at special angles, but keep arbitrary angles as Rz bloqs so
+                # Qualtran can synthesize them during resource estimation.
+                for rot_bloq in _rz_to_bloqs(angle, eps=eps):
+                    if isinstance(rot_bloq, Rz):
+                        qs[idx[0]] = bb.add(Rz(angle, eps=eps), q=qs[idx[0]])
+                    else:
+                        qs[idx[0]] = bb.add(rot_bloq, q=qs[idx[0]])
 
         elif name in _GATE_MAP and name not in ("cx", "cz", "swap", "ccx"):
             qs[idx[0]] = bb.add(_GATE_MAP[name], q=qs[idx[0]])
@@ -177,13 +213,16 @@ def qiskit_to_composite_bloq(circuit: QuantumCircuit, eps: float = 1e-11):
 # Factory construction helper
 # ---------------------------------------------------------------------------
 
-def _make_qualtran_factory(factory_type: str):
+def _make_qualtran_factory(factory_type: str, data_d: int = 17):
     """Return a Qualtran factory object for the given factory_type string."""
     if factory_type == "CCZ2T":
         from qualtran.surface_code import CCZ2TFactory
         return CCZ2TFactory()
+    if factory_type == "15to1":
+        from qualtran.surface_code import FifteenToOne
+        return FifteenToOne(d_X=data_d, d_Z=data_d, d_m=data_d)
     raise ValueError(
-        f"Unknown Qualtran factory type {factory_type!r}. Supported: 'CCZ2T'."
+        f"Unknown Qualtran factory type {factory_type!r}. Supported: 'CCZ2T', 'FifteenToOne'."
     )
 
 
@@ -192,32 +231,68 @@ def _make_qualtran_factory(factory_type: str):
 # (source: qualtranCircuitBuilder.ipynb — cell-phys-estimate / cell-hw-sweep)
 # ---------------------------------------------------------------------------
 
+def _wrap_factory(base_factory, n_factories: int):
+    """
+    Wrap a single factory in MultiFactory when n_factories > 1.
+
+    MultiFactory multiplies the physical qubit footprint by n_factories and
+    divides n_cycles by n_factories — matching Azure's parallel-factory model.
+    n_factories=1 returns the factory unchanged.
+    """
+    if n_factories == 1:
+        return base_factory
+    from qualtran.surface_code import MultiFactory
+    return MultiFactory(base_factory=base_factory, n_factories=n_factories)
+
+
 def _make_cost_model(cfg: QualtranConfig):
     """
     Build a Qualtran PhysicalCostModel from the pipeline configuration.
 
     Source: qualtranCircuitBuilder.ipynb — cell-phys-estimate, cell-hw-sweep.
+    When cfg.n_factories > 1, the base factory is wrapped in MultiFactory so
+    that both qubit footprint and runtime scale correctly.
     """
     from qualtran.surface_code import PhysicalCostModel
 
     if cfg.use_gidney_fowler and cfg.phys_err == 1e-3:
-        return PhysicalCostModel.make_gidney_fowler(data_d=cfg.data_d)
+        model = PhysicalCostModel.make_gidney_fowler(data_d=cfg.data_d)
+        if cfg.n_factories > 1:
+            from qualtran.surface_code import (
+                PhysicalParameters, QECScheme, SimpleDataBlock,
+            )
+            model = PhysicalCostModel(
+                physical_params=model.physical_params,
+                data_block=model.data_block,
+                factory=_wrap_factory(model.factory, cfg.n_factories),
+                qec_scheme=model.qec_scheme,
+            )
+        return model
 
     if cfg.use_beverland and cfg.phys_err == 1e-3:
-        return PhysicalCostModel.make_beverland_et_al(data_d=cfg.data_d)
+        model = PhysicalCostModel.make_beverland_et_al(data_d=cfg.data_d)
+        if cfg.n_factories > 1:
+            model = PhysicalCostModel(
+                physical_params=model.physical_params,
+                data_block=model.data_block,
+                factory=_wrap_factory(model.factory, cfg.n_factories),
+                qec_scheme=model.qec_scheme,
+            )
+        return model
 
     # Custom hardware profile (varies phys_err, cycle_time_us, and factory_type)
     from qualtran.surface_code import (
-        PhysicalParameters, QECScheme, SimpleDataBlock,
+        PhysicalParameters, QECScheme, SimpleDataBlock, CompactDataBlock, IntermediateDataBlock, FastDataBlock
     )
+    base_factory = _make_qualtran_factory(cfg.factory_type, cfg.data_d)
     return PhysicalCostModel(
         physical_params=PhysicalParameters(
             physical_error=cfg.phys_err,
             cycle_time_us=cfg.cycle_time_us,
         ),
         data_block=SimpleDataBlock(data_d=cfg.data_d),
-        factory=_make_qualtran_factory(cfg.factory_type),
-        qec_scheme=QECScheme.make_gidney_fowler(),
+        factory=_wrap_factory(base_factory, cfg.n_factories),
+        qec_scheme=QECScheme.make_beverland_et_al(),
     )
 
 
@@ -235,6 +310,7 @@ def _sweep_distances(cfg: QualtranConfig, algo) -> list:
         try:
             cfg_d = QualtranConfig(
                 data_d=d,
+                n_factories=cfg.n_factories,
                 phys_err=cfg.phys_err,
                 cycle_time_us=cfg.cycle_time_us,
                 rz_eps=cfg.rz_eps,
@@ -274,8 +350,6 @@ def compute_total_t_count(algo, error_budget: float = 1e-3) -> int:
     Solovay-Kitaev synthesis requires O(log(1/ε)) T gates per rotation.
     This function uses the standard approximation: ~3 * log2(1/ε) T gates.
 
-    Source: estimator/analysis/hamlib.ipynb.
-
     Parameters
     ----------
     algo         : AlgorithmSummary
@@ -283,7 +357,7 @@ def compute_total_t_count(algo, error_budget: float = 1e-3) -> int:
 
     Returns
     -------
-    int  estimated total T count
+    int estimated total T count
     """
     gc = algo.n_logical_gates
     t_exact = int(gc.t) + 4 * int(gc.toffoli) + 4 * int(gc.and_bloq)
@@ -414,7 +488,7 @@ def estimate(
 
     # Sort by physical qubits (ascending = default pareto_index=0)
     valid_rows.sort(key=lambda r: r["physical_qubits"])
-    idx = qt_cfg.pareto_index % len(valid_rows)
+    idx = qt_cfg.pareto_index % len(rows)
     best = valid_rows[idx]
 
     model = best["model"]
@@ -423,21 +497,26 @@ def estimate(
     error = best["error"]
     data_d = best["data_d"]
 
-    # 4. Phys qubit breakdown from the model (factory vs data block)
-    # Try multiple attribute names because Qualtran's API has changed across versions.
-    factory_qubits: Optional[int] = None
+    # 4. Phys qubit breakdown from the model (factory vs data block).
+    # model.factory may be a MultiFactory (when qt_cfg.n_factories > 1), so
+    # n_physical_qubits() already returns total_factory_qubits = n_factories × per_factory.
+    # We also extract the per-factory footprint separately for debugging.
+    factory_qubits: Optional[int] = None   # total factory qubits (all parallel factories)
+    qubits_per_factory: Optional[int] = None  # single-factory footprint (diagnostic)
     compute_qubits: Optional[int] = None
-    if model is not None and model.factory is not None:
-        for _attr in ("n_physical_qubits", "n_phys_qubits", "num_physical_qubits",
-                      "physical_qubits"):
-            try:
-                v = getattr(model.factory, _attr, None)
-                if v is not None:
-                    factory_qubits = int(v)
-                    compute_qubits = phys_qubits - factory_qubits
-                    break
-            except Exception:
-                pass
+    if model is not None:
+        try:
+            factory_qubits = int(model.factory.n_physical_qubits())
+            compute_qubits = int(
+                model.data_block.n_physical_qubits(n_algo_qubits=algo.n_algo_qubits)
+            )
+            # Resolve per-factory footprint: unwrap MultiFactory if needed.
+            base_factory = getattr(model.factory, "base_factory", model.factory)
+            qubits_per_factory = int(base_factory.n_physical_qubits())
+        except Exception:
+            # Fall back to subtraction if data_block API differs across versions.
+            if factory_qubits is not None:
+                compute_qubits = phys_qubits - factory_qubits
 
     # 5. T count (including Rz synthesis)
     t_exact = int(gc.t) + 4 * int(gc.toffoli) + 4 * int(gc.and_bloq)
@@ -462,11 +541,17 @@ def estimate(
     # 8. Factory statistics (best-effort; attributes vary across Qualtran versions)
     factory_stats = _extract_factory_stats(model)
 
-    # 9. Factory description string
-    # Include the class name and physical qubit count for the config column.
+    # 9. Factory description string (include total and per-factory for clarity)
     factory_count_str = qt_cfg.factory_type
     if factory_qubits is not None:
-        factory_count_str = f"{qt_cfg.factory_type} ({factory_qubits:,} qubits)"
+        if qt_cfg.n_factories > 1:
+            factory_count_str = (
+                f"{qt_cfg.factory_type} ×{qt_cfg.n_factories} "
+                f"({factory_qubits:,} total qubits; "
+                f"{qubits_per_factory:,} each)"
+            )
+        else:
+            factory_count_str = f"{qt_cfg.factory_type} ({factory_qubits:,} qubits)"
 
     return EstimationResult(
         estimator_name=f"Qualtran (d={data_d}, p={qt_cfg.phys_err:.0e})",
@@ -484,17 +569,19 @@ def estimate(
         measurement_count=int(gc.measurement),
         physical_qubits=phys_qubits,
         physical_compute_qubits=compute_qubits,
+        # factory_qubits = n_factories × qubits_per_factory (MultiFactory handles this)
         physical_factory_qubits=factory_qubits,
         # Qualtran's SimpleDataBlock does not split memory from compute.
         physical_memory_qubits=None,
         runtime_seconds=duration_hr * 3600,
-        # error_budget is not a Qualtran input; it takes code distance and
-        # computes logical error rate from the QEC model.
+        # Set to global_error_budget when provided; otherwise None (Qualtran doesn't
+        # natively accept a budget — it takes code distance instead).
         error_budget=None,
         logical_error_rate=float(error),
         code_distance=data_d,
         factory_type=qt_cfg.factory_type,
         factory_count=factory_count_str,
+        num_factories=qt_cfg.n_factories,
         t_per_rotation=t_per_rz_estimate,
         rotation_synthesis_precision=qt_cfg.rz_eps,
         physical_error_rate=qt_cfg.phys_err,
@@ -510,7 +597,8 @@ def estimate(
             f"t={config.evolution.evolution_time}"
         ),
         architecture_assumptions=(
-            f"{qt_cfg.factory_type} factory; surface-code d={data_d}; "
+            f"{qt_cfg.factory_type} factory ×{qt_cfg.n_factories}; "
+            f"surface-code d={data_d}; "
             f"phys_err={qt_cfg.phys_err:.0e}; "
             f"cycle_time={qt_cfg.cycle_time_us} µs"
         ),
@@ -527,6 +615,8 @@ def estimate(
                 "n_algo_qubits":  algo.n_algo_qubits,
             },
             "factory_stats": factory_stats,
+            # per-factory footprint (before MultiFactory scaling) for debug output
+            "qubits_per_factory": qubits_per_factory,
             "all_pareto_rows": [
                 {k: v for k, v in r.items() if k != "model"} for r in valid_rows
             ],

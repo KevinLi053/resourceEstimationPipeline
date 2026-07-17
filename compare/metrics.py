@@ -22,7 +22,7 @@ from ..circuit.transpile import circuit_stats
 def enrich_from_circuit(result: EstimationResult, circuit) -> EstimationResult:
     """
     Fill None logical-gate fields in result using circuit_stats().
-    Only overwrites fields that are currnetly None - neve replaces
+    Only overwrites fields that are currnetly None - never replaces
     a value the estimator itself provided.
     """
     stats = circuit_stats(circuit)
@@ -127,13 +127,23 @@ METRIC_DESCRIPTORS: List[Tuple[str, str, str]] = [
     # ── Error & QEC ───────────────────────────────────────────────────────────
     ("Error budget",
      "Error budget",
-     "Total error budget supplied to the estimator (Azure only)"),
+     "Total error budget: Azure uses it directly; Qualtran reports it when global_error_budget is set in PipelineConfig"),
     ("Logical error rate",
      "Logical error rate",
      "Estimated total logical failure probability"),
     ("Code distance",
      "Code distance",
      "Surface-code data-block distance"),
+    ("Logical cycle time (ns)",
+     "Logical cycle time (ns)",
+     "Time for one logical QEC cycle in ns (d syndrome-extraction rounds). "
+     "Azure: from LATTICE_SURGERY instruction.time(1). "
+     "Qualtran: derivable as code_distance × cycle_time_us × 1000."),
+    ("Code cycle time (ns)",
+     "Code cycle time (ns)",
+     "Syndrome extraction cycle time in ns. "
+     "Azure: CODE_CYCLE_TIME property on LATTICE_SURGERY instruction. "
+     "Qualtran: approximately cycle_time_us × 1000 (not directly reported)."),
 
     # ── Factory ───────────────────────────────────────────────────────────────
     ("Factory type",
@@ -142,6 +152,9 @@ METRIC_DESCRIPTORS: List[Tuple[str, str, str]] = [
     ("Factory config",
      "Factory config",
      "Magic-state factory configuration string / description"),
+    ("Number of factories",
+     "Number of factories",
+     "Parallel magic-state factories: Azure optimises this; Qualtran defaults to 1 (single factory, longer runtime)"),
 
     # ── Rotation synthesis ────────────────────────────────────────────────────
     ("T gates per rotation",

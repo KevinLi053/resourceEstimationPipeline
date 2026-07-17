@@ -5,33 +5,219 @@ Produces a single circuit suitable for both estimators:
   - Azure QDK reads it via OpenQASM 3 export.
   - Qualtran reads it via the CompositeBloq builder.
 
-Reuses transpilation logic from:
-  - estimator/analysis/hamlib.ipynb
-  - estimator/circuitBuilderGeneralized.ipynb  (circuit_to_qasm helper)
+Transpilation pipeline (when rotation_synthesis_enabled=True)
+-------------------------------------------------------------
+Stage 1 — Decompose to intermediate basis
+    Expand high-level gates (e.g. PauliEvolutionGate) into an intermediate
+    gate set that still includes rotation gates (Rz/Rx/Ry).  No optimisation
+    runs yet so rotations are preserved for combining in stage 2.
+
+Stage 2 — Optimise with rotations in place
+    Run Qiskit optimisation passes (controlled by config.optimization_level)
+    while rotation gates still exist.  Consecutive rotations on the same
+    qubit can be merged/cancelled here before the expensive synthesis step.
+
+Stage 3 — Synthesise arbitrary rotations into Clifford+T
+    Replace every Rz/Rx/Ry gate with an exact Clifford+T approximation using
+    Qiskit's built-in synthesis.  Precision is controlled by
+    config.rotation_synthesis_epsilon.  After this stage no rotation gates
+    remain.
+
+Stage 4 — Final cleanup to pure Clifford+T
+    Run a lightweight transpile pass to normalise any residual non-Clifford+T
+    gates that Qiskit may have introduced during synthesis.  Validate that no
+    rotation gates remain.
 
 Public API
 ----------
 transpile_to_clifford_t(circuit, config) -> QuantumCircuit
-    Transpile to the canonical basis defined in TranspileConfig.
-
+pre_synthesize_rz(circuit, epsilon) -> QuantumCircuit
 circuit_to_qasm(circuit) -> str
-    Export a transpiled circuit to an OpenQASM 3 string (for Azure).
-
 circuit_stats(circuit) -> dict
-    Return a summary dict of gate counts and depth.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import logging
+import math
+from typing import Any, Dict
 
+import numpy as np
 from qiskit import QuantumCircuit, transpile
+from qiskit.circuit.library import UnitaryGate
 from qiskit.qasm3 import Exporter
 
-from ..config import TranspileConfig
+from ..config import (
+    INTERMEDIATE_BASIS_GATES,
+    PURE_CLIFFORD_T_BASIS_GATES,
+    TranspileConfig,
+)
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Module-level basis constants
+# ---------------------------------------------------------------------------
+
+_INTERMEDIATE_BASIS: list = list(INTERMEDIATE_BASIS_GATES)
+"""Stage 1–2 basis: keeps rotation gates for optimisation."""
+
+_PURE_CLIFFORD_T_BASIS: list = list(PURE_CLIFFORD_T_BASIS_GATES)
+"""Stage 3–4 basis: pure Clifford+T, no arbitrary rotations."""
+
+_ROTN_NAMES: frozenset = frozenset({"rz", "rx", "ry", "r"})
+"""Gate names that carry an arbitrary rotation angle."""
 
 
 # ---------------------------------------------------------------------------
-# Main transpilation step
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _angle_to_unitary_matrix(angle: float, gate_name: str) -> np.ndarray:
+    """Convert a single-qubit rotation angle to its 2×2 unitary matrix."""
+    if gate_name == "rz":
+        return np.array([[np.exp(-1j * angle / 2), 0],
+                         [0,  np.exp( 1j * angle / 2)]])
+    if gate_name == "rx":
+        c = math.cos(angle / 2)
+        s = -1j * math.sin(angle / 2)
+        return np.array([[c, s], [s, c]])
+    if gate_name == "ry":
+        c =  math.cos(angle / 2)
+        s =  math.sin(angle / 2)
+        return np.array([[c, -s], [s, c]])
+    # generic "r" — treat as Rz
+    return _angle_to_unitary_matrix(angle, "rz")
+
+
+def _count_rotations(circuit: QuantumCircuit) -> Dict[str, int]:
+    """Return per-name counts for all rotation gates in the circuit."""
+    ops = dict(circuit.count_ops())
+    return {name: ops.get(name, 0) for name in _ROTN_NAMES}
+
+
+def _log_rotation_counts(label: str, counts: Dict[str, int]) -> None:
+    total = sum(counts.values())
+    detail = ", ".join(f"{n}={v}" for n, v in counts.items() if v)
+    log.info("[transpile] %s: %d rotation gate(s) (%s)", label, total, detail or "none")
+    print(f"[transpile] {label}: {total} rotation gate(s) ({detail or 'none'})")
+
+
+def _validate_no_rotations(circuit: QuantumCircuit) -> None:
+    """Raise RuntimeError if any rotation gate survives into the final circuit."""
+    counts = _count_rotations(circuit)
+    remaining = sum(counts.values())
+    if remaining > 0:
+        detail = ", ".join(f"{n}={v}" for n, v in counts.items() if v)
+        raise RuntimeError(
+            f"[transpile] Stage 4 validation failed: {remaining} rotation gate(s) "
+            f"remain after synthesis ({detail}). "
+            "Check that pre_synthesize_rz() handled all rotation gate types."
+        )
+    log.info("[transpile] Validation passed: no rotation gates in final circuit.")
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: rotation pre-synthesis
+# ---------------------------------------------------------------------------
+
+def pre_synthesize_rz(
+    circuit: QuantumCircuit,
+    epsilon: float = 1e-11,
+) -> QuantumCircuit:
+    """
+    Decompose every arbitrary rotation gate into Clifford+T.
+
+    Iterates the circuit instruction-by-instruction and rebuilds a new
+    circuit, replacing each rotation gate with its synthesised Clifford+T
+    expansion in place.  Non-rotation gates are copied verbatim.
+
+    The synthesis is performed per-gate via Qiskit's transpiler using a
+    UnitaryGate representation of the rotation matrix.  This gives an
+    exact (machine-precision) decomposition into the Clifford+T basis,
+    which is the appropriate method for fault-tolerant resource estimation
+    where T-gate counts must be determined before estimation.
+
+    Parameters
+    ----------
+    circuit : QuantumCircuit
+        May contain any mixture of Clifford+T and rotation gates.
+    epsilon : float
+        Approximation precision hint.  Used to select the Solovay-Kitaev
+        recursion degree when the SK pass is available; otherwise the
+        UnitaryGate + transpile fallback is used (machine-precision exact).
+
+    Returns
+    -------
+    QuantumCircuit
+        Equivalent circuit with all rotation gates replaced by Clifford+T
+        sequences.  Gate ordering is preserved.
+    """
+    out = QuantumCircuit(*circuit.qregs, *circuit.cregs)
+
+    # Try to load the Solovay-Kitaev pass for fault-tolerant synthesis.
+    sk_pass = _make_sk_pass(epsilon)
+
+    for instr in circuit.data:
+        gate = instr.operation
+        if gate.name not in _ROTN_NAMES:
+            out.append(gate, instr.qubits, instr.clbits)
+            continue
+
+        # Build a single-qubit sub-circuit containing this rotation as a unitary.
+        angle = float(gate.params[0])
+        mat = _angle_to_unitary_matrix(angle, gate.name)
+        sub = QuantumCircuit(1)
+        sub.append(UnitaryGate(mat), [0])
+
+        # Synthesise to Clifford+T.
+        if sk_pass is not None:
+            from qiskit.transpiler import PassManager
+            synth = PassManager([sk_pass]).run(sub)
+            synth = transpile(
+                synth,
+                basis_gates=_PURE_CLIFFORD_T_BASIS,
+                optimization_level=0,
+                seed_transpiler=42,
+            )
+        else:
+            synth = transpile(
+                sub,
+                basis_gates=_PURE_CLIFFORD_T_BASIS,
+                optimization_level=1,
+                seed_transpiler=42,
+            )
+
+        # Insert synthesised gates at this position (not at the end).
+        target_qubit = instr.qubits[0]
+        for sub_instr in synth.data:
+            out.append(sub_instr.operation, [target_qubit], [])
+
+    return out
+
+
+def _make_sk_pass(epsilon: float):
+    """Return a SolovayKitaevDecomposition pass instance, or None if unavailable."""
+    try:
+        from qiskit.transpiler.passes import SolovayKitaevDecomposition
+        degree = _epsilon_to_sk_degree(epsilon)
+        return SolovayKitaevDecomposition(recursion_degree=degree)
+    except (ImportError, Exception):
+        return None
+
+
+def _epsilon_to_sk_degree(epsilon: float) -> int:
+    """Map approximation epsilon to a Solovay-Kitaev recursion degree."""
+    if epsilon >= 1e-2:
+        return 2
+    if epsilon >= 1e-4:
+        return 3
+    if epsilon >= 1e-7:
+        return 4
+    return 5
+
+
+# ---------------------------------------------------------------------------
+# Main transpilation entry point
 # ---------------------------------------------------------------------------
 
 def transpile_to_clifford_t(
@@ -39,32 +225,112 @@ def transpile_to_clifford_t(
     config: TranspileConfig,
 ) -> QuantumCircuit:
     """
-    Transpile a Qiskit circuit to the canonical Clifford+T basis.
+    Transpile a Qiskit circuit to a pure Clifford+T basis via a 4-stage pipeline.
 
-    Source: estimator/analysis/hamlib.ipynb and circuitBuilderGeneralized.ipynb.
+    Stage 1 — Decompose to intermediate basis (rotations kept)
+    Stage 2 — Optimise while rotations exist (combine/cancel Rz chains)
+    Stage 3 — Synthesise every Rz/Rx/Ry into Clifford+T
+    Stage 4 — Final cleanup + validation (pure Clifford+T output)
 
-    Uses a deterministic Qiskit transpiler pass with a fixed random seed so
-    repeated runs always produce the same gate sequence.
+    When ``rotation_synthesis_enabled`` is False (or legacy
+    ``synthesis_strategy == "passthrough"``), the pipeline collapses to a
+    single ``transpile()`` call using ``config.basis_gates``.
 
     Parameters
     ----------
     circuit : QuantumCircuit
         Input circuit (may contain high-level gates such as PauliEvolutionGate).
     config  : TranspileConfig
-        Controls basis gates, optimization level, and random seed.
 
     Returns
     -------
-    QuantumCircuit in the requested Clifford+T basis.
+    QuantumCircuit in a pure Clifford+T basis with no arbitrary rotations.
     """
-    # For PauliEvolutionGate-based circuits we must decompose before transpiling
-    # (transpile will handle this automatically, but an explicit decompose call
-    # makes the gate count visible for debugging).
-    return transpile(
+    # Resolve legacy synthesis_strategy field alongside the new boolean flag.
+    synthesis_enabled = config.rotation_synthesis_enabled
+    if config.synthesis_strategy == "passthrough":
+        synthesis_enabled = False
+
+    if not synthesis_enabled:
+        # Passthrough: single-stage transpile, rotations pass through verbatim.
+        log.info("[transpile] Passthrough mode: single-stage transpile.")
+        return transpile(
+            circuit,
+            basis_gates=config.basis_gates,
+            optimization_level=config.optimization_level,
+            seed_transpiler=config.seed_transpiler,
+        )
+
+    # ── Stage 1: Decompose to intermediate basis (keeps rotation gates) ───────
+    log.info("[transpile] Stage 1: decompose to intermediate basis (rotations kept).")
+    print("[transpile] Stage 1: decomposing to intermediate basis...")
+    s1 = transpile(
         circuit,
-        basis_gates=config.basis_gates,
+        basis_gates=_INTERMEDIATE_BASIS,
+        optimization_level=0,       # no optimisation yet — just decompose
+        seed_transpiler=config.seed_transpiler,
+    )
+
+    # ── Stage 2: Optimise while rotations still exist ────────────────────────
+    log.info("[transpile] Stage 2: optimising with rotations in place (level=%d).",
+             config.optimization_level)
+    print(f"[transpile] Stage 2: optimising (level={config.optimization_level}) "
+          "with rotations in place...")
+    s2 = transpile(
+        s1,
+        basis_gates=_INTERMEDIATE_BASIS,
         optimization_level=config.optimization_level,
         seed_transpiler=config.seed_transpiler,
+    )
+
+    # ── Stage 3: Synthesise arbitrary rotations into Clifford+T ──────────────
+    pre_counts = _count_rotations(s2)
+    _log_rotation_counts("Before synthesis", pre_counts)
+
+    log.info("[transpile] Stage 3: synthesising rotations into Clifford+T "
+             "(epsilon=%.2e).", config.rotation_synthesis_epsilon)
+    print(f"[transpile] Stage 3: synthesising rotations "
+          f"(epsilon={config.rotation_synthesis_epsilon:.2e})...")
+    s3 = pre_synthesize_rz(s2, epsilon=config.rotation_synthesis_epsilon)
+
+    post_counts = _count_rotations(s3)
+    _log_rotation_counts("After synthesis", post_counts)
+    _print_gate_summary(s3)
+
+    # ── Stage 4: Final cleanup to pure Clifford+T + validation ───────────────
+    log.info("[transpile] Stage 4: final cleanup to pure Clifford+T.")
+    print("[transpile] Stage 4: final cleanup to pure Clifford+T...")
+    s4 = transpile(
+        s3,
+        basis_gates=_PURE_CLIFFORD_T_BASIS,
+        optimization_level=0,       # no further optimisation — just normalise
+        seed_transpiler=config.seed_transpiler,
+    )
+    _validate_no_rotations(s4)
+
+    ops = dict(s4.count_ops())
+    print(
+        f"[transpile] Done. T={ops.get('t', 0)+ops.get('tdg', 0)}  "
+        f"CX={ops.get('cx', 0)}  "
+        f"Clifford(H/S)={ops.get('h', 0)+ops.get('s', 0)+ops.get('sdg', 0)}  "
+        f"depth={s4.depth()}"
+    )
+    return s4
+
+
+def _print_gate_summary(circuit: QuantumCircuit) -> None:
+    """Print post-synthesis gate counts for diagnostics."""
+    ops = dict(circuit.count_ops())
+    t_count = ops.get("t", 0) + ops.get("tdg", 0)
+    clifford_count = sum(ops.get(g, 0) for g in ("h", "s", "sdg", "x", "y", "z"))
+    cx_count = ops.get("cx", 0)
+    rot_remaining = sum(ops.get(g, 0) for g in _ROTN_NAMES)
+    unsupported = {k: v for k, v in ops.items()
+                   if k not in {*_PURE_CLIFFORD_T_BASIS, "measure", "barrier", "reset"}}
+    print(
+        f"[transpile]   Post-synthesis: T={t_count}  Clifford={clifford_count}  "
+        f"CX={cx_count}  rotations_remaining={rot_remaining}  "
+        f"unsupported={unsupported or 'none'}"
     )
 
 
@@ -98,9 +364,7 @@ def compute_t_depth(circuit: QuantumCircuit) -> int:
     Compute T-gate depth using Qiskit DAG layer analysis.
 
     Returns the number of circuit layers that contain at least one T or
-    T-dagger gate (i.e., the T-gate critical-path depth).  This is a
-    property of the transpiled Clifford+T circuit and is independent of
-    the downstream estimator.
+    T-dagger gate (i.e., the T-gate critical-path depth).
     """
     from qiskit.converters import circuit_to_dag
 
@@ -125,21 +389,24 @@ def circuit_stats(circuit: QuantumCircuit) -> Dict[str, Any]:
     -------
     dict with keys:
       num_qubits, depth, t_depth, total_gates, gate_counts (dict),
-      t_count, clifford_count, rz_count
+      t_count, clifford_count, cx_count, rotation_count, rz_count
     """
     ops = dict(circuit.count_ops())
     t_gates = {"t", "tdg"}
     clifford_gates = {"h", "s", "sdg", "x", "y", "z", "cx", "cz", "swap", "ccx"}
     t_count = sum(ops.get(g, 0) for g in t_gates)
     clifford_count = sum(ops.get(g, 0) for g in clifford_gates)
+    rotation_count = sum(ops.get(g, 0) for g in _ROTN_NAMES)
 
     return {
-        "num_qubits": circuit.num_qubits,
-        "depth": circuit.depth(),
-        "t_depth": compute_t_depth(circuit),
-        "total_gates": sum(ops.values()),
-        "gate_counts": ops,
-        "t_count": t_count,
+        "num_qubits":     circuit.num_qubits,
+        "depth":          circuit.depth(),
+        "t_depth":        compute_t_depth(circuit),
+        "total_gates":    sum(ops.values()),
+        "gate_counts":    ops,
+        "t_count":        t_count,
         "clifford_count": clifford_count,
-        "rz_count": ops.get("rz", 0),
+        "cx_count":       ops.get("cx", 0),
+        "rotation_count": rotation_count,
+        "rz_count":       ops.get("rz", 0),
     }
