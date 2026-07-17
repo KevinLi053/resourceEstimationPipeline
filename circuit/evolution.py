@@ -11,8 +11,8 @@ from __future__ import annotations
 from qiskit import QuantumCircuit
 from qiskit.quantum_info import SparsePauliOp
 
-from resourceEstimationPipeline.config import EvolutionConfig
-from resourceEstimationPipeline.loaders.hamlib_loader import HamiltonianData
+from ..config import EvolutionConfig
+from ..loaders.hamlib_loader import HamiltonianData
 
 
 def build_pauli_evolution_circuit(

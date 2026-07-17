@@ -51,9 +51,23 @@ class EvolutionConfig:
 # Transpilation
 # ---------------------------------------------------------------------------
 
+# Intermediate basis used during stages 1–2 of transpilation.
+# Keeps arbitrary rotation gates so they can be optimised (combined/cancelled)
+# before rotation synthesis runs.
+INTERMEDIATE_BASIS_GATES: List[str] = [
+    "cx", "rz", "rx", "ry", "h", "s", "sdg", "t", "tdg", "x", "y", "z",
+]
+
+# Pure Clifford+T basis — no arbitrary rotation gates.
+# This is the output basis after rotation synthesis and is what both estimators
+# receive.  Azure QDK and Qualtran are both able to process this gate set.
+PURE_CLIFFORD_T_BASIS_GATES: List[str] = [
+    "h", "s", "sdg", "t", "tdg", "cx", "x", "y", "z",
+]
+
 # Canonical Clifford+T basis accepted by both Azure QDK and Qualtran.
-# This is the intersection of both estimators' gate sets and is the
-# standard fault-tolerant gate set.
+# Kept for backward compatibility; includes rz so that passthrough mode
+# (rotation_synthesis_enabled=False) still works.
 CANONICAL_BASIS_GATES: List[str] = [
     "cx", "rz", "h", "s", "sdg", "x", "y", "z", "t", "tdg",
 ]
@@ -72,21 +86,47 @@ class TranspileConfig:
         default_factory=lambda: list(CANONICAL_BASIS_GATES)
     )
     """
-    Gate set to transpile into. Both estimators share this canonical basis
-    so they operate on the same circuit. Override with QUALTRAN_EXTENDED_BASIS_GATES
-    to let Qualtran use its native cz/ccx/swap bloqs instead.
+    Gate set used in passthrough mode (rotation_synthesis_enabled=False).
+    When synthesis is enabled this field is ignored — the pipeline uses
+    INTERMEDIATE_BASIS_GATES for stages 1–2 and PURE_CLIFFORD_T_BASIS_GATES
+    for the final stage automatically.
     """
 
     optimization_level: int = 1
     """
-    Qiskit transpiler optimization level.
-    0 = decompose only (preserves gate counts exactly).
-    1 = light optimisation (default, balances depth vs. compilation time).
-    2–3 = heavier optimisation (slower build, smaller circuit).
+    Qiskit transpiler optimization level applied during stage 2 (while
+    rotation gates still exist so they can be combined before synthesis).
+    0 = decompose only.  1 = light (default).  2–3 = heavier.
     """
 
     seed_transpiler: Optional[int] = 42
     """Random seed for the transpiler (determinism)."""
+
+    rotation_synthesis_enabled: bool = True
+    """
+    When True (default), arbitrary rotation gates (Rz/Rx/Ry) are synthesised
+    into Clifford+T before estimation so both estimators receive an identical
+    pure Clifford+T circuit.
+
+    When False, the pipeline falls back to a single-stage transpile that
+    passes rotation gates through verbatim according to ``basis_gates``.
+    """
+
+    rotation_synthesis_epsilon: float = 1e-11
+    """
+    Target approximation precision for Rz/Rx/Ry → Clifford+T synthesis.
+    A smaller value increases accuracy at the cost of more T gates per rotation.
+    Typical range: 1e-8 (fast, loose) to 1e-12 (slow, tight).
+    """
+
+    synthesis_strategy: str = "qiskit_synth"
+    """
+    Legacy control kept for backward compatibility.
+    Prefer ``rotation_synthesis_enabled`` for new code.
+
+    ``"qiskit_synth"`` → rotation_synthesis_enabled=True
+    ``"passthrough"``  → rotation_synthesis_enabled=False
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -110,20 +150,22 @@ class AzureConfig:
     """Physical gate error rate."""
 
     gate_time_ns: float = 50.0
-    """Single/two-qubit gate time in nanoseconds."""
+    """Single-qubit gate time in nanoseconds."""
 
     measurement_time_ns: float = 100.0
     """Measurement time in nanoseconds."""
 
-    # QEC: surface-code ISA
-    surface_code_distances: Optional[List[int]] = None
+    two_qubit_gate_time_ns: Optional[float] = None
+    """Two-qubit gate time in nanoseconds."""
+
+    # QEC: surface-code distance
+    code_distance: Optional[int] = None
     """
-    Explicit code distances to sweep. None = let qdk.qre sweep automatically
-    via SurfaceCode.q().
+    Fix the surface-code distance passed to SurfaceCode.q(distance=...).
     """
 
     # Magic-state factory
-    factory_type: str = "Litinski19"
+    factory_type: str = "RoundBased"
     """
     Factory model: 'Litinski19' or 'RoundBased'.
     Litinski19Factory is newer and generally more efficient.
@@ -158,8 +200,6 @@ class AzureConfig:
 class QualtranConfig:
     """
     Knobs for Google Qualtran's surface-code resource estimation pipeline.
-
-    Reference implementations in: qualtranEstimator/qualtranCircuitBuilder.ipynb
     """
 
     # QEC: code distance
@@ -193,8 +233,17 @@ class QualtranConfig:
     factory_type: str = "CCZ2T"
     """
     Qualtran magic-state factory model used in the custom cost-model path.
-    Currently supported: 'CCZ2T' (Gidney-Fowler CCZ-to-T factory).
+    Currently supported: 'CCZ2T' (Gidney-Fowler CCZ-to-T factory) and 'FifteenToOne.
     Only takes effect when use_gidney_fowler=False and use_beverland=False.
+    """
+
+    # Number of parallel magic-state factories
+    n_factories: int = 1
+    """
+    Number of parallel CCZ2T factories to run simultaneously.
+    1 = single factory (default): runtime scales with T count, qubit footprint is fixed.
+    N > 1: wraps with MultiFactory — footprint × N, runtime / N.
+    Use this to match Azure's multi-factory behaviour.
     """
 
     # Decomposition / estimation precision
@@ -204,7 +253,11 @@ class QualtranConfig:
     If False, construct a custom PhysicalCostModel from `phys_err` and `cycle_time_us`.
     """
 
-    use_beverland: bool = True
+    use_beverland: bool = False
+    """
+    If True, use the Beverland FifteenToOne factory model.
+    If False, construct a custom PhysicalCostModel from `phys_err` and `cycle_time_us`.
+    """
 
     # Result selection
     pareto_index: int = 0

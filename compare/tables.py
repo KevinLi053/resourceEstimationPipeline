@@ -1,7 +1,7 @@
 """
 Table rendering for comparison reports.
 
-Converts :class:`~resourceEstimationPipeline.compare.metrics.ComparisonReport`
+Converts :class:`~compare.metrics.ComparisonReport`
 objects into pandas DataFrames and rich text output.
 
 Public API
@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from resourceEstimationPipeline.compare.metrics import ComparisonReport, MetricComparison
+from .metrics import ComparisonReport, MetricComparison
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +51,11 @@ def comparison_dataframe(report: ComparisonReport):
         rows.append(row)
 
     df = pd.DataFrame(rows)
+    # Rows where ratio is not applicable (non-numeric or one side missing) have no
+    # "Ratio (B/A)" key in their dict, so pandas fills those cells with NaN.
+    # Replace with "—" so the column stays all-string.
+    if "Ratio (B/A)" in df.columns:
+        df["Ratio (B/A)"] = df["Ratio (B/A)"].fillna("—")
     # Put Metric first
     cols = ["Metric"] + [c for c in df.columns if c != "Metric"]
     return df[cols]
@@ -186,6 +191,95 @@ def highlight_differences(report: ComparisonReport) -> None:
             parts.append(f"{n}: {_fmt(v, mc.metric)}")
         ratio_str = f"  →  ratio {mc.ratio:.3f}×" if mc.ratio is not None else ""
         print(f"  {mc.metric}: {' | '.join(parts)}{ratio_str}")
+
+
+def print_qubit_debug(results) -> None:
+    """
+    Print a side-by-side physical-qubit breakdown for debugging.
+
+    Compares:
+      Azure:    compute qubits | factory qubits | num_factories | total
+      Qualtran: logical qubits | compute qubits | qubits_per_factory
+                | num_factories | total factory qubits | total
+
+    Also validates that compute + factory (+ memory) == total for each estimator.
+
+    Parameters
+    ----------
+    results : ComparisonReport  OR  list of EstimationResult
+    """
+    from .metrics import ComparisonReport
+    if isinstance(results, ComparisonReport):
+        result_list = results.results
+    else:
+        result_list = list(results)
+
+    sep = "─" * 72
+    print(sep)
+    print("  PHYSICAL QUBIT BREAKDOWN (DEBUG)")
+    print(sep)
+
+    for r in result_list:
+        is_azure = "azure" in r.estimator_name.lower() or "qdk" in r.estimator_name.lower()
+        print(f"\n  [{r.estimator_name}]")
+
+        if is_azure:
+            compute  = r.physical_compute_qubits
+            factory  = r.physical_factory_qubits
+            memory   = r.physical_memory_qubits
+            n_fact   = r.num_factories
+            total    = r.physical_qubits
+
+            qpf      = (factory // n_fact) if (factory and n_fact) else None
+
+            print(f"    Physical compute qubits      : {compute:>12,}" if compute is not None else "    Physical compute qubits      :          N/A")
+            print(f"    Physical factory qubits (tot): {factory:>12,}" if factory is not None else "    Physical factory qubits (tot):          N/A")
+            print(f"    Qubits per factory           : {qpf:>12,}"    if qpf     is not None else "    Qubits per factory           :          N/A")
+            print(f"    Number of factories          : {n_fact:>12,}" if n_fact  is not None else "    Number of factories          :          N/A")
+            print(f"    Physical memory qubits       : {memory:>12,}" if memory  is not None else "    Physical memory qubits       :          N/A")
+            print(f"    Total physical qubits        : {total:>12,}"  if total   is not None else "    Total physical qubits        :          N/A")
+
+            # Validation
+            if compute is not None and factory is not None and total is not None:
+                reconstructed = compute + factory + (memory or 0)
+                match = "OK" if reconstructed == total else f"MISMATCH (got {reconstructed:,})"
+                print(f"    Validation compute+factory+memory=total: {match}")
+
+        else:
+            # Qualtran
+            logical  = r.logical_qubits
+            compute  = r.physical_compute_qubits
+            factory  = r.physical_factory_qubits
+            n_fact   = r.num_factories
+            total    = r.physical_qubits
+            qpf      = r.extra.get("qubits_per_factory") if r.extra else None
+
+            print(f"    Logical qubits               : {logical:>12,}" if logical is not None else "    Logical qubits               :          N/A")
+            print(f"    Physical compute qubits      : {compute:>12,}" if compute is not None else "    Physical compute qubits      :          N/A")
+            print(f"    Qubits per factory           : {qpf:>12,}"    if qpf     is not None else "    Qubits per factory           :          N/A")
+            print(f"    Number of factories          : {n_fact:>12,}" if n_fact  is not None else "    Number of factories          :          N/A")
+            print(f"    Total factory qubits         : {factory:>12,}" if factory is not None else "    Total factory qubits         :          N/A")
+            print(f"    Total physical qubits        : {total:>12,}"  if total   is not None else "    Total physical qubits        :          N/A")
+
+            if compute is not None and factory is not None and total is not None:
+                reconstructed = compute + factory
+                match = "OK" if reconstructed == total else f"MISMATCH (got {reconstructed:,})"
+                print(f"    Validation compute+factory=total         : {match}")
+
+        # Error budget info
+        print(f"    Error budget                 : {r.error_budget}" if r.error_budget is not None else "    Error budget                 :          N/A")
+        if r.rotation_synthesis_precision is not None:
+            print(f"    Rotation synthesis precision : {r.rotation_synthesis_precision:.3e}")
+
+    print()
+    print(sep)
+    print("  KEY MODEL DIFFERENCE:")
+    print("  Azure uses N parallel factories (optimizer-chosen) to meet the error")
+    print("  budget; total factory qubits = N × per-factory footprint.")
+    print("  Qualtran (default n_factories=1) runs a single factory for more cycles;")
+    print("  factory qubit count is therefore constant (independent of algorithm size).")
+    print("  Set QualtranConfig.n_factories > 1 or use MultiFactory to match Azure.")
+    print(sep)
 
 
 def explain_differences(report: ComparisonReport) -> str:
