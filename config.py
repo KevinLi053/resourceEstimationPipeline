@@ -8,7 +8,7 @@ construction, transpilation, Azure QDK, and Qualtran.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +128,34 @@ class TranspileConfig:
     ``"passthrough"``  → rotation_synthesis_enabled=False
     """
 
+    synthesis_method: str = "solovay_kitaev"
+    """
+    Which algorithm to use for synthesising arbitrary rotation gates into Clifford+T.
+
+    ``"solovay_kitaev"`` (default) — uses Qiskit's built-in Solovay-Kitaev
+        decomposition or its transpile-based fallback.  Works for all angles but
+        produces approximate decompositions with T-count scaling ~log^3(1/epsilon).
+
+    ``"pygridsynth"`` — uses the pygridsynth library for optimal or near-optimal
+        exact Clifford+T synthesis via grid-based lattice search.  For angles that
+        lie on the ``Z[1/2]`` Clifford+T grid (e.g. ``pi/4``, ``pi/8``, ``pi/6``)
+        it returns the **minimal** T-count.  Typically produces 2-10x fewer T gates
+        than Solovay-Kitaev for common angles.
+
+    Requires ``synthesis_method="pygridsynth"`` to also have ``rotation_synthesis_enabled=True``.
+    When synthesis is disabled (passthrough mode), this field is ignored.
+    """
+
+    pygridsynth_precision: Optional[float] = None
+    """
+    Dedicated approximation precision for the pygridsynth backend.
+
+    If ``None`` (default), falls back to ``rotation_synthesis_epsilon``.
+    Recommended range: 1e-8 (fast, near-optimal) to 1e-10 (optimal for exact grid points).
+
+    Only relevant when ``synthesis_method="pygridsynth"``.
+    """
+
 
 # ---------------------------------------------------------------------------
 # Azure QDK Resource Estimator
@@ -184,6 +212,14 @@ class AzureConfig:
     Higher = more aggressive gate cancellation before estimation.
     """
 
+    # Use-graph
+    use_graph: bool = True
+    """
+    use_graph=False for more completeness on Pareto frontier
+    """
+
+    minimize: str = "qubit_hours"
+
     # Estimation result selection
     pareto_index: int = 0
     """
@@ -219,21 +255,43 @@ class QualtranConfig:
     phys_err: float = 1e-3
     """Physical gate error rate (same default as Azure for apples-to-apples comparison)."""
 
+    t_gate_ns: float = 50.0
+    """Single-qubit gate time in nanoseconds — matches Beverland superconducting default."""
+
+    t_meas_ns: float = 100.0
+    """Measurement time in nanoseconds — matches Beverland superconducting default.
+
+    Note: qualtran's PhysicalParameters only stores cycle_time_us, not these individually.
+    They are retained here for display / comparison and to derive the Beverland formula
+    (cycle_time_ns = 4*t_gate + 2*t_meas) when needed.
+    """
+
     cycle_time_us: float = 1.0
     """Surface-code cycle time in microseconds."""
 
-    # Rotation synthesis
-    rz_eps: float = 1e-11
-    """
-    Synthesis precision for arbitrary Rz gates when converting them to
-    Clifford+T sequences inside the CompositeBloq builder.
-    """
+    # Rotation synthesis (error-budget driven)
+    # eps_per_rotation is derived from error_budget at runtime as:
+    #   eps_per_rotation = (error_budget / 3) / max(rotation_count, 1)
+    # No separate rz_eps knob — this avoids conflicting error models.
+    error_budget: float = 0.01
+
+    # Data block type for logical qubit encoding
+    data_block: str = "simple"
+    """Data block type: 'simple', 'compact', 'intermediate', or 'fast'."""
 
     # Magic-state factory
-    factory_type: str = "CCZ2T"
+    factory_type: str = "15to1"
     """
     Qualtran magic-state factory model used in the custom cost-model path.
     Currently supported: 'CCZ2T' (Gidney-Fowler CCZ-to-T factory) and 'FifteenToOne.
+    Only takes effect when use_gidney_fowler=False and use_beverland=False.
+    """
+    
+    # Quantum error correction scheme
+    qec_scheme: str = "beverland"
+    """
+    QEC scheme for the custom cost model path.
+    Currently supported: 'beverland', 'gidney_fowler'.
     Only takes effect when use_gidney_fowler=False and use_beverland=False.
     """
 
@@ -259,13 +317,31 @@ class QualtranConfig:
     If False, construct a custom PhysicalCostModel from `phys_err` and `cycle_time_us`.
     """
 
+    # Azure parameter injection (connector)
+    use_azure_parameters: bool = False
+    """
+    When True, the Qualtran estimator will override its QEC parameters with
+    values extracted from an Azure QDK estimation result.  This enables
+    ``Mode 1: Azure-matched estimation`` — Qualtran uses Azure's chosen
+    code distance and factory count as fixed inputs instead of its own sweep
+    or defaults.
+
+    When False (default), Qualtran behaves normally with its own native
+    parameter selection, enabling ``Mode 2: Native Qualtran optimization``.
+
+    To activate in the pipeline, set this to True AND pass an
+    ``azure_result`` via ``PipelineConfig.qualtran.azure_result``.
+    If the Azure result is missing or does not expose code distance / factory
+    count, the estimator falls back to its native behavior for each missing
+    parameter.
+    """
+
     # Result selection
     pareto_index: int = 0
     """
     Which Pareto-optimal solution (from the data_d sweep) to use as the 'best'.
     0 = minimum physical qubits, -1 = minimum runtime.
     """
-
 
 # ---------------------------------------------------------------------------
 # Top-level pipeline configuration

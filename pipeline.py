@@ -20,8 +20,11 @@ run(config) -> PipelineResult
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
+from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
+
+log = logging.getLogger(__name__)
 
 from qiskit import QuantumCircuit
 
@@ -225,6 +228,47 @@ def run(
     # ── Step 5: Qualtran estimator ────────────────────────────────────────────
     if run_qualtran:
         try:
+            # ── Inject Azure parameters into Qualtran config (optional) ─────
+            # When cfg.qualtran.use_azure_parameters=True and azure_result is
+            # available, override Qualtran's QEC parameters with the values
+            # Azure chose.  This enables "Mode 1: Azure-matched estimation"
+            # where Qualtran estimates resources using Azure's fixed distance
+            # and factory count instead of its own sweep/defaults.
+            azure_params = None
+            if run_azure and result.azure_result is not None:
+                from resourceEstimationPipeline.estimators.azure import (
+                    extract_azure_parameters as _extract_azure_params,
+                )
+                azure_params = _extract_azure_params(result.azure_result)
+                use_azure = config.qualtran.use_azure_parameters
+                d = azure_params.get("code_distance")
+                n = azure_params.get("num_factories")
+                if use_azure and (d is not None or n is not None):
+                    # Build a shallow copy of QualtranConfig with Azure overrides.
+                    # This leaves the original config object untouched so other
+                    # pipeline runs remain unaffected.
+                    from resourceEstimationPipeline.config import QualtranConfig
+
+                    az_overrides: dict = {}
+                    if d is not None:
+                        az_overrides["data_d_sweep"] = [d]  # sweep single Azure distance
+                    if n is not None:
+                        az_overrides["n_factories"] = n
+                    if not config.qualtran.data_d_sweep:
+                        az_overrides["use_azure_parameters"] = True
+
+                    config = PipelineConfig(
+                        hamlib=config.hamlib,
+                        evolution=config.evolution,
+                        transpile=config.transpile,
+                        azure=config.azure,
+                        qualtran=QualtranConfig(**{**asdict(config.qualtran), **az_overrides}),
+                    )
+                    log.debug(
+                        "Azure → Qualtran injected: d=%s  n_factories=%s",
+                        d, n,
+                    )
+
             from resourceEstimationPipeline.estimators.qualtran import estimate as qt_estimate
             result.qualtran_result = qt_estimate(result.clifford_t_circuit, config)
             print(

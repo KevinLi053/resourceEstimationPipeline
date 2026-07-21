@@ -54,6 +54,11 @@ class EstimationResult:
     t_count: Optional[int] = None
     """Total T-gate count (including those synthesised from arbitrary Rz)."""
 
+    t_count_circuit: Optional[int] = None
+    """T-gate count from the input Clifford+T circuit only (no synthesis overhead).
+    Populated by enrich_from_circuit() for Azure. Qualtran does not set this
+    since it works from bloqs, not a circuit."""
+
     t_depth: Optional[int] = None
     """T-gate depth (T gates on the critical path)."""
 
@@ -130,7 +135,9 @@ class EstimationResult:
     """Number of T gates used to synthesise each arbitrary Rz rotation."""
 
     rotation_synthesis_precision: Optional[float] = None
-    """Target synthesis error per Rz rotation (rz_eps / ε_synth)."""
+    """Per-rotation synthesis precision derived from the global error budget.
+    Computed as ``(error_budget / 3) / max(rotation_count, 1)`` so that the total
+    rotation synthesis error stays within one-third of the algorithm budget."""
 
     # ── Physical parameters (estimator hardware assumptions) ─────────────────
     physical_error_rate: Optional[float] = None
@@ -215,6 +222,7 @@ class EstimationResult:
 
             # ── Gate counts ───────────────────────────────────────────────────
             "T count": self.t_count,
+            "T count (from circuit)": self.t_count_circuit,
             "T depth": self.t_depth,
             "Clifford count": self.clifford_count,
             "Rotation count (arb. Rz)": self.rotation_count,

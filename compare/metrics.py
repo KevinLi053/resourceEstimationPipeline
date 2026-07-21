@@ -55,6 +55,9 @@ def enrich_from_circuit(result: EstimationResult, circuit) -> EstimationResult:
     if result.t_depth is None:
         overrides["t_depth"] = stats.get("t_depth")
 
+    if result.t_count_circuit is None:
+        overrides["t_count_circuit"] = stats["t_count"]
+
     return dataclasses.replace(result, **overrides)
 
 
@@ -92,6 +95,9 @@ METRIC_DESCRIPTORS: List[Tuple[str, str, str]] = [
     ("T depth",
      "T depth",
      "T-gate circuit depth (critical path); not available from Qualtran"),
+    ("T count (from circuit)",
+     "T count (from circuit)",
+     "Raw T-gate count from the input Clifford+T circuit (no toffoli/Rz synthesis overhead). Azure reports this; Qualtran t_count includes synthesis."),
     ("Clifford count",
      "Clifford count",
      "Total Clifford gate count"),
@@ -162,7 +168,7 @@ METRIC_DESCRIPTORS: List[Tuple[str, str, str]] = [
      "T gates used to synthesise each arbitrary Rz"),
     ("Rotation synthesis precision (ε)",
      "Rotation synthesis precision (ε)",
-     "Target synthesis error per Rz rotation (rz_eps); Qualtran only"),
+     "(error_budget / 3) / rotation_count; Qualtran derives this from global budget"),
 
     # ── Physical parameters (estimator assumptions) ───────────────────────────
     ("Physical error rate",

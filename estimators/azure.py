@@ -5,8 +5,13 @@ Reuses estimation logic from:
   - estimator/circuitBuilderGeneralized.ipynb  (Steps 8–12)
   - estimator/analysis/hamlib.ipynb             (qdk.qre usage)
 
-The public entry point is :func:`estimate`, which satisfies the
-:class:`~estimators.base.Estimator` protocol.
+The public entry points are:
+
+  - :func:`estimate` — runs Azure QDK resource estimation (satisfies the
+    :class:`~estimators.base.Estimator` protocol).
+  - :func:`extract_azure_parameters` — extracts surface-code parameters
+    (code distance, factory count) from an Azure ``EstimationResult`` for
+    injection into other estimators (e.g. Qualtran).
 
 ━━━ How qdk.qre stores results ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -125,7 +130,7 @@ def _to_float_safe(v) -> Optional[float]:
         return None
 
 
-def _extract_qec_params(best) -> dict:
+def _extract_qec_params(best, *, expected_code_cycle_ns: int | None = None) -> dict:
     """
     Extract QEC code parameters from the LATTICE_SURGERY instruction.
 
@@ -134,7 +139,16 @@ def _extract_qec_params(best) -> dict:
     extraction cycle time as CODE_CYCLE_TIME (key = 21).  The logical cycle
     time equals d × code_cycle_time = instruction.time(arity=1).
 
-    Returns a dict with keys (all may be absent if extraction fails):
+    Parameters
+    ----------
+    expected_code_cycle_ns : int or None
+        The code_cycle_override value passed to SurfaceCode (in ns). When
+        provided, the function logs a warning if the extracted CODE_CYCLE_TIME
+        differs — useful for debugging override propagation failures.
+
+    Returns
+    -------
+    dict with keys (all may be absent if extraction fails):
       "code_distance"       – int
       "code_cycle_time_ns"  – int, syndrome extraction round time in ns
       "logical_cycle_time_ns" – int, = d × code_cycle_time in ns
@@ -165,6 +179,19 @@ def _extract_qec_params(best) -> dict:
         cct = ls_instr.get_property(CODE_CYCLE_TIME)
         if cct is not None:
             result["code_cycle_time_ns"] = int(cct)
+            # Validate override propagated correctly
+            if expected_code_cycle_ns is not None and cct != expected_code_cycle_ns:
+                log.warning(
+                    "SurfaceCode code_cycle_override mismatch: "
+                    "expected=%d ns but ISA reports %d ns",
+                    expected_code_cycle_ns, cct,
+                )
+        else:
+            if expected_code_cycle_ns is not None:
+                log.debug(
+                    "CODE_CYCLE_TIME absent from ISA — override=%d ns was requested",
+                    expected_code_cycle_ns,
+                )
 
         # Logical cycle time = d × code_cycle_time = instruction time per 1-qubit op
         lct = ls_instr.time(1)
@@ -242,6 +269,112 @@ def _extract_factory(best) -> dict:
         log.debug("_extract_factory failed: %s", exc)
 
     return result
+
+
+def extract_azure_parameters(azure_result: EstimationResult) -> Dict[str, Optional[int]]:
+    """Extract surface-code parameters chosen by the Azure QDK estimator.
+
+    This is a clean interface for downstream consumers (e.g. the Qualtran
+    adapter) to obtain the two key QEC parameters that Azure's optimizer
+    selected for its best Pareto solution.
+
+    Parameters
+    ----------
+    azure_result : EstimationResult
+        Result from ``estimators.azure.estimate()``.
+
+    Returns
+    -------
+    dict
+        ``{"code_distance": <int or None>, "num_factories": <int or None>}``
+        Values are ``None`` when the Azure estimator did not expose them
+        (e.g. fixed distance was set in config and extraction failed).
+
+    Notes
+    -----
+    The underlying values come from two independent extraction paths:
+
+      * ``code_distance`` — read from the ``DISTANCE`` property key (int=0) on
+        the LATTICE_SURGERY instruction inside the Azure QRE ISA source graph.
+        Falls back to the config-specified fixed distance if that path fails.
+
+      * ``num_factories`` — read from ``best.factories[T].copies``, i.e. the
+        number of parallel magic-state factory instances selected by the
+        optimizer.
+
+    If either value is missing, callers should fall through to their native
+    parameter selection (e.g. Qualtran's own sweep / defaults).
+    """
+    return {
+        "code_distance": azure_result.code_distance,
+        "num_factories": azure_result.num_factories,
+    }
+
+
+def apply_azure_to_qualtran(
+    azure_result: EstimationResult,
+    config,
+):
+    """Return a new PipelineConfig with Azure QDK parameters injected into QualtranConfig.
+
+    Use this between Step 4 (Azure estimation) and Step 5 (Qualtran estimation)
+    when calling the estimators directly (e.g. in a notebook) instead of via
+    :func:`~pipeline.run`:
+
+        >>> azure_result = azure_estimate(circuit, cfg)
+        >>> cfg = apply_azure_to_qualtran(azure_result, cfg)
+        >>> qualtran_result = qt_estimate(circuit, cfg)
+
+    Parameters
+    ----------
+    azure_result : EstimationResult
+        Result from ``estimators.azure.estimate()``.
+    config : PipelineConfig
+        Original pipeline configuration (not modified in-place).
+
+    Returns
+    -------
+    PipelineConfig
+        A new config object with Qualtran's ``data_d_sweep`` and ``n_factories``
+        overridden by Azure's chosen values. The original ``config`` is untouched.
+
+    Notes
+    -----
+    If Azure does not expose code_distance or num_factories (both are None),
+    the corresponding Qualtran parameter is left unchanged — preserving its
+    native optimization behavior for that dimension.
+    """
+    params = extract_azure_parameters(azure_result)
+    az_d = params.get("code_distance")
+    az_n = params.get("num_factories")
+
+    if az_d is None and az_n is None:
+        # Nothing to inject — return config unchanged
+        return config
+
+    from dataclasses import asdict
+
+    from ..config import PipelineConfig, QualtranConfig
+
+    # Start from the existing QualtranConfig values (including use_azure_parameters)
+    merged = dict(asdict(config.qualtran))
+
+    # Override with Azure values where available
+    if az_d is not None:
+        merged["data_d_sweep"] = [az_d]  # sweep single Azure distance
+    if az_n is not None:
+        merged["n_factories"] = az_n
+    if not config.qualtran.data_d_sweep:
+        merged["use_azure_parameters"] = True
+
+    new_qualtran = QualtranConfig(**merged)
+    return PipelineConfig(
+        hamlib=config.hamlib,
+        evolution=config.evolution,
+        transpile=config.transpile,
+        azure=config.azure,
+        qualtran=new_qualtran,
+    )
 
 
 def _log_diagnostic(best, props: dict, qec: dict, factory: dict) -> None:
@@ -330,7 +463,15 @@ def estimate(
     sc_kwargs: dict = {}
     if az_cfg.code_distance is not None:
         sc_kwargs["distance"] = az_cfg.code_distance
-    isa_query = SurfaceCode.q(**sc_kwargs) * _make_factory(az_cfg)
+
+    # Use qualtran's cycle_time_us (converted to ns) as the SurfaceCode code_cycle_override
+    # so both estimators share the same syndrome-extraction cycle time.
+    qt_cycle_ns = int(config.qualtran.cycle_time_us * 1_000)
+    log.info(
+        "Azure QEC alignment: qualtran.cycle_time_us=%s µs → code_cycle_override=%d ns",
+        config.qualtran.cycle_time_us, qt_cycle_ns,
+    )
+    isa_query = SurfaceCode(code_cycle_override=qt_cycle_ns).q(**sc_kwargs) * _make_factory(az_cfg)
 
     # 5. Run
     result = _qre_estimate(
@@ -338,13 +479,24 @@ def estimate(
         arch,
         isa_query,
         max_error=az_cfg.error_budget,
+        use_graph=az_cfg.use_graph,
     )
 
     if len(result) == 0:
         raise RuntimeError("Azure QDK returned no Pareto-optimal solutions.")
 
     # 6. Pick the requested Pareto solution
-    idx = az_cfg.pareto_index % len(result)
+    df = result.as_frame()
+    if az_cfg.minimize == 'qubit_hours':
+        df['_qubit_hours'] = df['qubits'] * df['runtime'].dt.total_seconds() / 3600.0
+        idx = df['_qubit_hours'].idxmin()
+    elif az_cfg.minimize == 'qubits':
+        idx = df['qubits'].idxmin()
+    elif az_cfg.minimize == 'runtime':
+        idx = df['runtime'].idxmin()
+    else:
+        idx = az_cfg.pareto_index
+
     best = result[idx]  # EstimationTableEntry
 
     # ── Native property access (integer keys — authoritative) ─────────────────
@@ -380,7 +532,7 @@ def estimate(
     # ── QEC parameters from the LATTICE_SURGERY instruction ───────────────────
     # Code distance and cycle times are NOT in best.properties; they are stored
     # as properties on the LATTICE_SURGERY instruction in the ISA source graph.
-    qec_params = _extract_qec_params(best)
+    qec_params = _extract_qec_params(best, expected_code_cycle_ns=qt_cycle_ns)
     code_dist             = qec_params.get("code_distance")
     code_cycle_time_ns    = qec_params.get("code_cycle_time_ns")
     logical_cycle_time_ns = qec_params.get("logical_cycle_time_ns")
@@ -478,7 +630,7 @@ def estimate(
         physical_error_rate=az_cfg.error_rate,
         gate_time_ns=az_cfg.gate_time_ns,
         measurement_time_ns=az_cfg.measurement_time_ns,
-        cycle_time_us=None,  # Azure uses gate_time_ns + meas_time_ns instead
+        cycle_time_us=code_cycle_time_ns / 1e3,  # Azure uses gate_time_ns + meas_time_ns instead
 
         # ── Assumptions ──────────────────────────────────────────────────────
         algorithm_assumptions=(
@@ -491,7 +643,9 @@ def estimate(
             f"GateBased error_rate={az_cfg.error_rate:.0e}; "
             f"gate_time={az_cfg.gate_time_ns} ns; "
             f"meas_time={az_cfg.measurement_time_ns} ns; "
+            f"two_qubit_gate_time={arch.two_qubit_gate_time} ns; "
             f"SurfaceCode QEC d={code_dist}; "
+            f"code_cycle_override={qt_cycle_ns} ns (from qualtran.cycle_time_us) "
             f"factory={az_cfg.factory_type}"
         ),
 
@@ -514,5 +668,9 @@ def estimate(
             "factory_error_rate": factory_info.get("factory_error_rate"),
             # Total T states produced by the factory (PSSPC-transformed demand)
             "t_state_count": factory_info.get("t_state_count"),
+            # ── Cross-estimator timing alignment (for debugging / verification) ──
+            "qt_cycle_time_us_injected": config.qualtran.cycle_time_us,
+            "qt_t_gate_ns": config.qualtran.t_gate_ns,
+            "qt_t_meas_ns": config.qualtran.t_meas_ns,
         },
     )
