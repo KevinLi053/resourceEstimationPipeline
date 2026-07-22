@@ -336,6 +336,21 @@ class QualtranConfig:
     parameter.
     """
 
+    # Azure QDK alignment
+    azure_cycle_time_us: Optional[float] = None
+    """
+    Physical cycle time to use for the Azure estimator when it shares hardware
+    parameters with qualtran (same SurfaceCode code_cycle_override).
+
+    When ``None`` (default), this is derived from whichever qualtran preset is active:
+
+      * ``use_beverland=True``        → 0.4 µs  (Beverland superconducting: 4×50 + 2×100)
+      * ``use_gidney_fowler=True``    → 1.0 µs  (Gidney-Fowler default)
+      * custom path                   → ``cycle_time_us``
+
+    Set this explicitly to override the automatic derivation with a known value.
+    """
+
     # Result selection
     pareto_index: int = 0
     """

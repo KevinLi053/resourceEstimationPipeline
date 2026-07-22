@@ -464,14 +464,39 @@ def estimate(
     if az_cfg.code_distance is not None:
         sc_kwargs["distance"] = az_cfg.code_distance
 
-    # Use qualtran's cycle_time_us (converted to ns) as the SurfaceCode code_cycle_override
-    # so both estimators share the same syndrome-extraction cycle time.
-    qt_cycle_ns = int(config.qualtran.cycle_time_us * 1_000)
-    log.info(
-        "Azure QEC alignment: qualtran.cycle_time_us=%s µs → code_cycle_override=%d ns",
-        config.qualtran.cycle_time_us, qt_cycle_ns,
+    # Derive qualtran's actual cycle_time_us from whichever preset path is active,
+    # so Azure uses the identical SurfaceCode code_cycle_override.
+    qt_cfg = config.qualtran
+    # Explicit override in config takes priority
+    effective_qt_cycle_us = (
+        qt_cfg.azure_cycle_time_us
+        if qt_cfg.azure_cycle_time_us is not None
+        else (
+            0.4  # Beverland preset: 4×50 + 2×100 = 400 ns
+            if qt_cfg.use_beverland
+            else (
+                1.0  # Gidney-Fowler preset: hardcoded in PhysicalParameters
+                if qt_cfg.use_gidney_fowler
+                else qt_cfg.cycle_time_us  # custom path — use config directly
+            )
+        )
     )
-    isa_query = SurfaceCode(code_cycle_override=qt_cycle_ns).q(**sc_kwargs) * _make_factory(az_cfg)
+
+    # CRITICAL NOTE (QDK 1.30.0 bug): code_cycle_override MUST be passed to .q() as a kwarg,
+    # NOT to the SurfaceCode constructor.  When set on the constructor it is silently ignored
+    # and QDK falls back to the GateBased-derived default:
+    #   one_qubit_gate_depth*gate_time + two_qubit_gate_depth*two_q_gate_time + meas_time
+    # = 1*50 + 4*50 + 100 = 350 ns (with our defaults).
+    qt_cycle_ns = int(effective_qt_cycle_us * 1_000)
+    log.info(
+        "Azure QEC alignment: qualtran preset='%s' → effective cycle_time=%s µs → "
+        "code_cycle_override=%d ns",
+        "beverland" if qt_cfg.use_beverland else (
+            "gidney_fowler" if qt_cfg.use_gidney_fowler else "custom"
+        ),
+        effective_qt_cycle_us, qt_cycle_ns,
+    )
+    isa_query = SurfaceCode().q(**sc_kwargs, code_cycle_override=qt_cycle_ns) * _make_factory(az_cfg)
 
     # 5. Run
     result = _qre_estimate(
@@ -575,6 +600,34 @@ def estimate(
         runtime_ns, error_rate,
     )
 
+    # ── Compute rotation-synthesis fields before the EstimationResult call ────
+    # t_per_rotation = NUM_TS_PER_ROTATION (T gates per Rz synthesised by PSSPC).
+    # Azure QDK always reports this param even when the circuit has zero
+    # arbitrary Rz rotations — it reflects an internal PSSPC budget rather than
+    # actual synthesis.  We detect real rotations from the QASM and suppress
+    # the metric when none are present.
+    rz_in_qasm = sum(
+        1 for line in qasm_source.splitlines()
+        if line.strip().lower().startswith("rz")
+    )
+    _has_rotations = rz_in_qasm > 0
+
+    if _has_rotations:
+        _t_per_rotation = t_per_rot
+        _synthesis_note = None  # Azure's NUM_TS_PER_ROTATION speaks for itself
+    else:
+        # Distinguish "genuinely no Rz" from "rotations pre-synthesized to T".
+        # rotation_synthesis_enabled=True + no Rz in QASM → rotations were
+        # already synthesized into T gates during an earlier pass.
+        if config.transpile.rotation_synthesis_enabled:
+            _synthesis_note = "pre-synthesized (rotations converted to T)"
+        else:
+            _synthesis_note = "no rotations"
+        _t_per_rotation = 0  # meaningful zero — no synthesis was performed
+
+    # rotation_synthesis_precision: Azure uses budget-fraction allocation, not ε.
+    _rz_eps: Optional[float] = None
+
     return EstimationResult(
         estimator_name=(
             f"Azure QDK (err_rate={az_cfg.error_rate:.0e}, "
@@ -621,10 +674,11 @@ def estimate(
         num_factories=num_factories,
 
         # ── Rotation synthesis ────────────────────────────────────────────────
-        # t_per_rotation = NUM_TS_PER_ROTATION (T gates per Rz synthesised by PSSPC)
-        t_per_rotation=t_per_rot,
-        # rotation_synthesis_precision: Azure uses budget-fraction allocation, not ε.
-        rotation_synthesis_precision=None,
+        t_per_rotation=_t_per_rotation,
+        rotation_synthesis_precision=_rz_eps,
+
+        # synthesis_note explains t_per_rotation context (e.g., 'no rotations', 'pre-synthesized')
+        synthesis_note=_synthesis_note,
 
         # ── Physical hardware parameters ──────────────────────────────────────
         physical_error_rate=az_cfg.error_rate,

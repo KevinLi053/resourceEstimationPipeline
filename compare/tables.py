@@ -303,6 +303,31 @@ def explain_differences(report: ComparisonReport) -> str:
         "input circuit."
     )
     lines.append("")
+
+    # ── Check for rotation context and emit targeted note ───────────────
+    no_rot_names = []
+    pre_syn_names = []
+    for r in report.results:
+        if r.synthesis_note == "no rotations" or r.synthesis_note == "no rotations (input unknown)":
+            no_rot_names.append(r.estimator_name)
+        elif r.synthesis_note and "pre-synthesized" in r.synthesis_note:
+            pre_syn_names.append(r.estimator_name)
+
+    if no_rot_names and not pre_syn_names:
+        # All estimators have genuinely zero rotations → explain t_per_rotation is N/A
+        lines.append("ROTATION CONTEXT:")
+        for name in no_rot_names:
+            lines.append(f"  • {name}: genuinely no Rz rotations — the input circuit has zero "
+                         "arbitrary-angle Rz gates. t_per_rotation is meaningless (reported as N/A).")
+        lines.append("")
+    elif pre_syn_names:
+        # At least one estimator had pre-synthesized rotations
+        for name in pre_syn_names:
+            lines.append(f"  • {name}: rotations were pre-synthesized during transpilation "
+                         "(converted to T gates earlier). t_per_rotation is N/A because the "
+                         "circuit no longer contains Rz gates to synthesize.")
+        lines.append("")
+
     lines.append("Key model differences:")
     lines.append("")
     lines.append(
@@ -311,7 +336,8 @@ def explain_differences(report: ComparisonReport) -> str:
         "     it uses internally for the given error budget).\n"
         "   • Qualtran: counts raw Rz gates from the bloq graph; T synthesis cost\n"
         "     is estimated post-hoc via the Solovay-Kitaev formula ~3·log₂(1/ε).\n"
-        "   → Expect T-count differences when rotation_count > 0."
+        "   → Expect T-count differences when rotation_count > 0. When rotation_count == 0\n"
+        "     both estimators suppress t_per_rotation (N/A) and add a synthesis note."
     )
     lines.append("")
     lines.append(

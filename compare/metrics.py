@@ -130,6 +130,11 @@ METRIC_DESCRIPTORS: List[Tuple[str, str, str]] = [
      "Runtime (s)",
      "Estimated wall-clock runtime in seconds"),
 
+    # ── Space-Time Volume ─────────────────────────────────────────────────────
+    ("Space-Time (qubit s)",
+     "Space-Time (qubit s)",
+     "Estimated Space-Time Volume in qubit-seconds"),
+
     # ── Error & QEC ───────────────────────────────────────────────────────────
     ("Error budget",
      "Error budget",
@@ -165,10 +170,13 @@ METRIC_DESCRIPTORS: List[Tuple[str, str, str]] = [
     # ── Rotation synthesis ────────────────────────────────────────────────────
     ("T gates per rotation",
      "T gates per rotation",
-     "T gates used to synthesise each arbitrary Rz"),
+     "T gates used to synthesise each arbitrary Rz. 0 when no rotations are present."),
     ("Rotation synthesis precision (ε)",
      "Rotation synthesis precision (ε)",
      "(error_budget / 3) / rotation_count; Qualtran derives this from global budget"),
+    ("Synthesis note",
+     "Synthesis note",
+     "Context for t_per_rotation: 'no rotations' (genuinely no Rz in the circuit), 'pre-synthesized' (rotations were converted to T during a prior transpilation pass)."),
 
     # ── Physical parameters (estimator assumptions) ───────────────────────────
     ("Physical error rate",
@@ -227,13 +235,20 @@ class MetricComparison:
     values: Dict[str, Any]      # {estimator_name: value_or_None}
     available: Dict[str, bool]  # {estimator_name: True/False}
     ratio: Optional[float] = None  # value[1] / value[0] if both numeric, else None
+    _synthesis_note: Optional[Dict[str, str]] = field(default_factory=dict)
+    """Extra display notes for this metric (e.g. synthesis_note → contextual 'N/A')."""
 
     def as_display_dict(self) -> Dict[str, str]:
         """Return values formatted for table display ('N/A' for missing)."""
         out: Dict[str, str] = {"Metric": self.metric}
         for name, val in self.values.items():
             if val is None:
-                out[name] = "N/A"
+                # For T-gates-per-rotation, show contextual note instead of bare 'N/A'.
+                note = self._synthesis_note.get(name)
+                if note:
+                    out[name] = f"N/A ({note})"
+                else:
+                    out[name] = "N/A"
             elif isinstance(val, float):
                 out[name] = f"{val:.4g}"
             elif isinstance(val, int):
@@ -350,12 +365,21 @@ def compare(results: List[EstimationResult]) -> ComparisonReport:
                 except (ZeroDivisionError, TypeError):
                     pass
 
+        # Collect synthesis_note for contextual N/A on "T gates per rotation" row.
+        syn_notes: Dict[str, str] = {}
+        if key == "T gates per rotation":
+            for name, r in zip(names, results):
+                note = r.synthesis_note
+                if note is not None:
+                    syn_notes[name] = note
+
         mc = MetricComparison(
             metric=label,
             description=description,
             values=values,
             available=available,
             ratio=ratio,
+            _synthesis_note=syn_notes if key == "T gates per rotation" else {},
         )
         metric_rows.append(mc)
 

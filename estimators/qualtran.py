@@ -299,7 +299,7 @@ def _make_cost_model(cfg: QualtranConfig):
         return model
 
     if cfg.use_beverland and cfg.phys_err == 1e-3:
-        model = PhysicalCostModel.make_beverland_et_al(data_d=cfg.data_d, factory_ds=(cfg.data_d, cfg.data_d, cfg.data_d))
+        model = PhysicalCostModel.make_beverland_et_al(data_d=cfg.data_d, data_block_name="intermediate", factory_ds=(cfg.data_d, cfg.data_d, cfg.data_d))
         if cfg.n_factories > 1:
             model = PhysicalCostModel(
                 physical_params=model.physical_params,
@@ -582,7 +582,7 @@ def estimate(
         raise RuntimeError("Qualtran returned no valid Pareto solutions.")
 
     # Sort by physical qubits (ascending = default pareto_index=0)
-    valid_rows.sort(key=lambda r: r["physical_qubits"])
+    valid_rows.sort(key=lambda r: r["physical_qubits"] * r["duration_hr"])
     idx = qt_cfg.pareto_index % len(rows)
     best = valid_rows[idx]
 
@@ -617,7 +617,20 @@ def estimate(
     t_exact = int(gc.t) + 4 * int(gc.toffoli) + 4 * int(gc.and_bloq)
 
     # Total T count (including Rz synthesis) — uses the same eps_per_rotation.
-    t_total, t_per_rotation = compute_total_t_count(algo, eps_per_rotation=eps_per_rotation)
+    # When there are zero rotations, t_per_rotation is meaningless regardless of the
+    # synthesis formula: it only describes "T gates per Rz" and there is no Rz to apply.
+    # We also distinguish "genuinely no Rz" from "pre-synthesized into T".
+    if rot_count > 0:
+        t_total, t_per_rotation = compute_total_t_count(algo, eps_per_rotation=eps_per_rotation)
+        synthesis_note: Optional[str] = None
+    else:
+        # No rotations to synthesize. Check transpile config to tell "pre-synthesized" from "genuinely no Rz".
+        if config.transpile.rotation_synthesis_enabled:
+            synthesis_note = "pre-synthesized (rotations converted to T)"
+        else:
+            synthesis_note = "no rotations"
+        t_total = int(gc.t) + 4 * int(gc.toffoli) + 4 * int(gc.and_bloq)
+        t_per_rotation = 0  # meaningful zero — no synthesis was performed
 
     # Logical cycles: derived from duration_hr and cycle_time_us.
     # Exact when duration_hr = n_cycles * cycle_time_us / 1e6 / 3600.
@@ -627,7 +640,7 @@ def estimate(
         if cycle_time_us > 0:
             logical_cycles = int(
                 round(duration_hr * 3600 * 1e6 / cycle_time_us)
-            )
+            ) / data_d
 
     # Circuit-derived T depth (DAG layer analysis on the transpiled Clifford+T circuit).
     # Qualtran's CompositeBloq has no time ordering so we derive T depth from the
@@ -642,12 +655,12 @@ def estimate(
     if factory_qubits is not None:
         if qt_cfg.n_factories > 1:
             factory_count_str = (
-                f"{qt_cfg.factory_type} ×{qt_cfg.n_factories} "
-                f"({factory_qubits:,} total qubits; "
+                f"{qt_cfg.factory_type}×{qt_cfg.n_factories} ("
+                # f"{factory_qubits:,} total qubits; "
                 f"{qubits_per_factory:,} each)"
             )
         else:
-            factory_count_str = f"{qt_cfg.factory_type} ({factory_qubits:,} qubits)"
+            factory_count_str = f"{qt_cfg.factory_type}×1 ({factory_qubits:,} qubits)"
 
     return EstimationResult(
         estimator_name=f"Qualtran (d={data_d}, p={model.physical_params.physical_error:.0e})",
@@ -682,6 +695,7 @@ def estimate(
         num_factories=qt_cfg.n_factories,
         t_per_rotation=t_per_rotation,
         rotation_synthesis_precision=eps_per_rotation,
+        synthesis_note=synthesis_note,
         physical_error_rate=model.physical_params.physical_error,
         cycle_time_us=model.physical_params.cycle_time_us,
         # Gate/measurement timing — informational (Qualtran PhysicalParameters
