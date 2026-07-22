@@ -13,6 +13,7 @@ Bradens_RE_Comparison
 
 braden_pipeline.ipynb
 list_hamlib_by_qubits.py
+logical_cycles.ipynb
 low_T_circuits.ipynb
 metrics.ipynb
 output_qdk_vs_qualtran_report.md

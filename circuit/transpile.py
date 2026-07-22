@@ -18,7 +18,7 @@ Stage 2 — Optimise with rotations in place
     qubit can be merged/cancelled here before the expensive synthesis step.
 
 Stage 3 — Synthesise arbitrary rotations into Clifford+T
-    Replace every Rz/Rx/Ry gate with an exact Clifford+T approximation using
+    Replace every Rz/Rx/Ry gate with a Clifford+T approximation using
     Qiskit's built-in synthesis.  Precision is controlled by
     config.rotation_synthesis_epsilon.  After this stage no rotation gates
     remain.
@@ -123,6 +123,7 @@ def _validate_no_rotations(circuit: QuantumCircuit) -> None:
 def pre_synthesize_rz(
     circuit: QuantumCircuit,
     epsilon: float = 1e-11,
+    synthesis_method: str = "solovay_kitaev",
 ) -> QuantumCircuit:
     """
     Decompose every arbitrary rotation gate into Clifford+T.
@@ -131,20 +132,24 @@ def pre_synthesize_rz(
     circuit, replacing each rotation gate with its synthesised Clifford+T
     expansion in place.  Non-rotation gates are copied verbatim.
 
-    The synthesis is performed per-gate via Qiskit's transpiler using a
-    UnitaryGate representation of the rotation matrix.  This gives an
-    exact (machine-precision) decomposition into the Clifford+T basis,
-    which is the appropriate method for fault-tolerant resource estimation
-    where T-gate counts must be determined before estimation.
+    This function is now a thin dispatcher around :func:`rotation_synthesis.synthesize_rotation`.
+    The ``synthesis_method`` parameter selects which backend to use:
+
+    - ``"solovay_kitaev"`` (default) — uses Qiskit's Solovay-Kitaev pass.
+      **This is the existing path and its behaviour is identical to prior versions.**
+    - ``"pygridsynth"`` — uses pygridsynth for optimal or near-optimal exact
+      Clifford+T synthesis.  Requires ``pip install pygridsynth``.
 
     Parameters
     ----------
     circuit : QuantumCircuit
         May contain any mixture of Clifford+T and rotation gates.
     epsilon : float
-        Approximation precision hint.  Used to select the Solovay-Kitaev
-        recursion degree when the SK pass is available; otherwise the
-        UnitaryGate + transpile fallback is used (machine-precision exact).
+        Approximation precision hint.  Interpretation depends on backend:
+        Solovay-Kitaev → upper bound on diamond-norm error per gate.
+        pygridsynth     → maximum distance from nearest Clifford+T grid point.
+    synthesis_method : str
+        Which synthesis algorithm to use (see above).
 
     Returns
     -------
@@ -152,47 +157,10 @@ def pre_synthesize_rz(
         Equivalent circuit with all rotation gates replaced by Clifford+T
         sequences.  Gate ordering is preserved.
     """
-    out = QuantumCircuit(*circuit.qregs, *circuit.cregs)
+    # Import the unified dispatcher — lazy to avoid hard dependency.
+    from .rotation_synthesis import synthesize_rotation as _synth
 
-    # Try to load the Solovay-Kitaev pass for fault-tolerant synthesis.
-    sk_pass = _make_sk_pass(epsilon)
-
-    for instr in circuit.data:
-        gate = instr.operation
-        if gate.name not in _ROTN_NAMES:
-            out.append(gate, instr.qubits, instr.clbits)
-            continue
-
-        # Build a single-qubit sub-circuit containing this rotation as a unitary.
-        angle = float(gate.params[0])
-        mat = _angle_to_unitary_matrix(angle, gate.name)
-        sub = QuantumCircuit(1)
-        sub.append(UnitaryGate(mat), [0])
-
-        # Synthesise to Clifford+T.
-        if sk_pass is not None:
-            from qiskit.transpiler import PassManager
-            synth = PassManager([sk_pass]).run(sub)
-            synth = transpile(
-                synth,
-                basis_gates=_PURE_CLIFFORD_T_BASIS,
-                optimization_level=0,
-                seed_transpiler=42,
-            )
-        else:
-            synth = transpile(
-                sub,
-                basis_gates=_PURE_CLIFFORD_T_BASIS,
-                optimization_level=1,
-                seed_transpiler=42,
-            )
-
-        # Insert synthesised gates at this position (not at the end).
-        target_qubit = instr.qubits[0]
-        for sub_instr in synth.data:
-            out.append(sub_instr.operation, [target_qubit], [])
-
-    return out
+    return _synth(circuit, synthesis_method=synthesis_method, epsilon=epsilon)
 
 
 def _make_sk_pass(epsilon: float):
@@ -288,10 +256,23 @@ def transpile_to_clifford_t(
     _log_rotation_counts("Before synthesis", pre_counts)
 
     log.info("[transpile] Stage 3: synthesising rotations into Clifford+T "
-             "(epsilon=%.2e).", config.rotation_synthesis_epsilon)
+             "(epsilon=%.2e, method=%s).", config.rotation_synthesis_epsilon,
+             config.synthesis_method)
     print(f"[transpile] Stage 3: synthesising rotations "
-          f"(epsilon={config.rotation_synthesis_epsilon:.2e})...")
-    s3 = pre_synthesize_rz(s2, epsilon=config.rotation_synthesis_epsilon)
+          f"(epsilon={config.rotation_synthesis_epsilon:.2e}, "
+          f"method={config.synthesis_method})...")
+
+    # Resolve pygridsynth_precision → fallback to rotation_synthesis_epsilon.
+    syn_epsilon = (
+        config.pygridsynth_precision
+        if config.pygridsynth_precision is not None
+        else config.rotation_synthesis_epsilon
+    )
+    s3 = pre_synthesize_rz(
+        s2,
+        epsilon=syn_epsilon,
+        synthesis_method=config.synthesis_method,
+    )
 
     post_counts = _count_rotations(s3)
     _log_rotation_counts("After synthesis", post_counts)

@@ -54,6 +54,11 @@ class EstimationResult:
     t_count: Optional[int] = None
     """Total T-gate count (including those synthesised from arbitrary Rz)."""
 
+    t_count_circuit: Optional[int] = None
+    """T-gate count from the input Clifford+T circuit only (no synthesis overhead).
+    Populated by enrich_from_circuit() for Azure. Qualtran does not set this
+    since it works from bloqs, not a circuit."""
+
     t_depth: Optional[int] = None
     """T-gate depth (T gates on the critical path)."""
 
@@ -127,10 +132,22 @@ class EstimationResult:
 
     # ── Rotation synthesis ───────────────────────────────────────────────────
     t_per_rotation: Optional[int] = None
-    """Number of T gates used to synthesise each arbitrary Rz rotation."""
+    """Number of T gates used to synthesise each arbitrary Rz rotation.
+
+    When no rotations are present in the circuit, this is set to 0 and
+    ``synthesis_note`` carries a short description (e.g. "no rotations",
+    "pre-synthesized"). When the value is None, it means the estimator
+    did not attempt synthesis at all (e.g. Azure without QASM inspection)."""
+
+    synthesis_note: Optional[str] = None
+    """Context about rotation count: 'no rotations' for genuinely no Rz gates,
+    'pre-synthesized' when rotations were converted to T gates during an earlier pass.
+    Set alongside t_per_rotation so the comparison layer can explain it."""
 
     rotation_synthesis_precision: Optional[float] = None
-    """Target synthesis error per Rz rotation (rz_eps / ε_synth)."""
+    """Per-rotation synthesis precision derived from the global error budget.
+    Computed as ``(error_budget / 3) / max(rotation_count, 1)`` so that the total
+    rotation synthesis error stays within one-third of the algorithm budget."""
 
     # ── Physical parameters (estimator hardware assumptions) ─────────────────
     physical_error_rate: Optional[float] = None
@@ -192,6 +209,13 @@ class EstimationResult:
         # Approximate: treats factory qubits as statically allocated for the full run.
         phys_per_t = _safe_div(self.physical_factory_qubits, self.t_count)
 
+        # space_time_volume: total qubit-seconds (space-time volume).
+        # Product of physical qubit footprint and wall-clock runtime.
+        if self.physical_qubits is not None and self.runtime_seconds is not None:
+            space_time_volume = self.physical_qubits * self.runtime_seconds
+        else:
+            space_time_volume = None
+
         return {
             "physical_qubits_per_logical_qubit": phys_per_log,
             "factory_qubit_fraction": factory_frac,
@@ -199,6 +223,7 @@ class EstimationResult:
             "T_per_logical_qubit": t_per_lq,
             "logical_cycles_per_T_gate": cycles_per_t,
             "physical_qubits_per_T_state": phys_per_t,
+            "space_time_volume": space_time_volume,
         }
 
     def as_dict(self) -> Dict[str, Any]:
@@ -215,6 +240,7 @@ class EstimationResult:
 
             # ── Gate counts ───────────────────────────────────────────────────
             "T count": self.t_count,
+            "T count (from circuit)": self.t_count_circuit,
             "T depth": self.t_depth,
             "Clifford count": self.clifford_count,
             "Rotation count (arb. Rz)": self.rotation_count,
@@ -229,6 +255,7 @@ class EstimationResult:
 
             # ── Timing ────────────────────────────────────────────────────────
             "Runtime (s)": self.runtime_seconds,
+            "Space-Time (qubit s)": dm["space_time_volume"],
 
             # ── Error & QEC ───────────────────────────────────────────────────
             "Error budget": self.error_budget,
@@ -245,6 +272,7 @@ class EstimationResult:
             # ── Rotation synthesis ────────────────────────────────────────────
             "T gates per rotation": self.t_per_rotation,
             "Rotation synthesis precision (ε)": self.rotation_synthesis_precision,
+            "Synthesis note": self.synthesis_note,
 
             # ── Physical parameters (assumptions) ─────────────────────────────
             "Physical error rate": self.physical_error_rate,
