@@ -13,6 +13,7 @@ Bradens_RE_Comparison
 
 /notebooks/figs/
 /notebooks/results/
+/notebooks/qasm3_circuits/
 
 braden_pipeline.ipynb
 list_hamlib_by_qubits.py
