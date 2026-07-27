@@ -11,6 +11,9 @@ Bradens_RE_Comparison
 
 /notebooks/comparison_test.ipynb
 
+/notebooks/figs/
+/notebooks/results/
+
 braden_pipeline.ipynb
 list_hamlib_by_qubits.py
 logical_cycles.ipynb

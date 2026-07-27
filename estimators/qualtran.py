@@ -299,7 +299,7 @@ def _make_cost_model(cfg: QualtranConfig):
         return model
 
     if cfg.use_beverland and cfg.phys_err == 1e-3:
-        model = PhysicalCostModel.make_beverland_et_al(data_d=cfg.data_d, data_block_name="intermediate", factory_ds=(cfg.data_d, cfg.data_d, cfg.data_d))
+        model = PhysicalCostModel.make_beverland_et_al(data_d=cfg.data_d, data_block_name="fast", factory_ds=(cfg.data_d, cfg.data_d, cfg.data_d))
         if cfg.n_factories > 1:
             model = PhysicalCostModel(
                 physical_params=model.physical_params,
