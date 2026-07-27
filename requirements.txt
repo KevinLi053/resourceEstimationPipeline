@@ -1,4 +1,5 @@
 annotated-types==0.7.0
+antlr4-python3-runtime==4.13.2
 anyio==4.14.1
 anywidget==0.11.0
 appdirs==1.4.4
@@ -35,6 +36,7 @@ dash==4.4.0
 debugpy==1.8.21
 decorator==5.3.1
 defusedxml==0.7.1
+deprecation==2.1.0
 diastatic-malt==2.15.3
 dill==0.4.1
 duet==0.2.9
@@ -99,6 +101,8 @@ notebook==7.6.0
 notebook_shim==0.2.4
 numba==0.66.0
 numpy==2.4.6
+openfermion==1.8.1
+openqasm3==1.0.1
 osqp==1.1.3
 packaging==26.2
 pandas==3.0.3
@@ -117,6 +121,7 @@ protobuf==7.35.1
 psutil==7.2.2
 psygnal==0.15.1
 ptyprocess==0.7.0
+PubChemPy==1.0.5
 pure_eval==0.2.3
 pycparser==3.0
 pydantic==2.13.4
@@ -136,6 +141,7 @@ pyzx==0.10.4
 qdk==1.30.0
 qdldl==0.1.9.post1
 qiskit==2.5.0
+qiskit-qasm3-import==0.6.0
 qref==0.11.0
 qsharp==1.30.0
 qsharp-widgets==1.29.1
@@ -143,7 +149,7 @@ qualtran==0.7.0
 quimb==1.14.0
 referencing==0.37.0
 requests==2.34.2
--e git+https://github.com/KevinLi053/resourceEstimationPipeline.git@f97c82dc9be15d29403bc73d2855f91a42cdb5a8#egg=resourceEstimationPipeline
+-e git+https://github.com/KevinLi053/resourceEstimationPipeline.git@71560cdf48fff562f889cccf2e11e713b77d9b9d#egg=resourceEstimationPipeline
 retrying==1.4.2
 rfc3339-validator==0.1.4
 rfc3986-validator==0.1.1
