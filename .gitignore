@@ -9,6 +9,8 @@ __pycache__/
 
 Bradens_RE_Comparison
 
+/kevin
+
 /notebooks/comparison_test.ipynb
 
 /notebooks/figs/
@@ -17,11 +19,4 @@ Bradens_RE_Comparison
 /notebooks/qasm_circuits/
 /notebooks/results/
 
-braden_pipeline.ipynb
-list_hamlib_by_qubits.py
-logical_cycles.ipynb
-low_T_circuits.ipynb
-metrics.ipynb
-qdk_v_qualtran.ipynb
-output.ipynb
-qubits.txt
+pipeline.txt
