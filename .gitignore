@@ -1,4 +1,4 @@
-/.venv
+.venv
 
 .DS_Store
 
@@ -9,14 +9,14 @@ __pycache__/
 
 Bradens_RE_Comparison
 
-/kevin
+kevin
 
-/notebooks/comparison_test.ipynb
+notebooks/comparison_test.ipynb
 
-/notebooks/figs/
-/notebooks/heat_map
-/notebooks/qasm3_circuits/
-/notebooks/qasm_circuits/
-/notebooks/results/
+**/figs/
+**/heat_map
+**/qasm3_circuits/
+**/qasm_circuits/
+**/results/
 
 pipeline.txt
