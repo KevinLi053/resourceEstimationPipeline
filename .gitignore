@@ -1,4 +1,4 @@
-/.venv
+.venv
 
 .DS_Store
 
@@ -9,16 +9,14 @@ __pycache__/
 
 Bradens_RE_Comparison
 
-/notebooks/comparison_test.ipynb
+kevin
 
-/notebooks/figs/
-/notebooks/results/
+notebooks/comparison_test.ipynb
 
-braden_pipeline.ipynb
-list_hamlib_by_qubits.py
-logical_cycles.ipynb
-low_T_circuits.ipynb
-metrics.ipynb
-qdk_v_qualtran.ipynb
-output.ipynb
-qubits.txt
+**/figs/
+**/heat_map
+**/qasm3_circuits/
+**/qasm_circuits/
+**/results/
+
+pipeline.txt
