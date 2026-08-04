@@ -322,6 +322,141 @@ def _make_cost_model(cfg: QualtranConfig):
         qec_scheme=_make_qec_scheme(cfg.qec_scheme),
     )
 
+# ---------------------------------------------------------------------------
+# Data-block class (not instance) lookup helper
+# ---------------------------------------------------------------------------
+
+def _get_data_block_cls(db_type: str):
+    """
+    Return the DataBlock *class* (not an instance) for the given db_type string.
+
+    Used by optimize_factory_and_count, which takes ``data_block_cls`` as a
+    callable of the form ``data_block_cls(data_d=...)`` rather than a pre-built
+    instance.  Mirrors the instance factory in ``_make_data_block``.
+    """
+    if db_type == "simple":
+        from qualtran.surface_code import SimpleDataBlock
+        return SimpleDataBlock
+    if db_type == "compact":
+        from qualtran.surface_code import CompactDataBlock
+        return CompactDataBlock
+    if db_type == "intermediate":
+        from qualtran.surface_code import IntermediateDataBlock
+        return IntermediateDataBlock
+    # "fast" is the default; also serves as the fallback for unrecognised types.
+    from qualtran.surface_code import FastDataBlock
+    return FastDataBlock
+
+
+import math
+from qualtran.surface_code import (
+    FifteenToOne,
+    MultiFactory,
+    LogicalErrorModel,
+    FastDataBlock,
+)
+from qualtran.surface_code import beverland_et_al_model
+from qualtran.resource_counting import GateCounts
+
+
+def optimize_factory_and_count(
+    *,
+    n_logical_gates: GateCounts,
+    logical_error_model: LogicalErrorModel,
+    error_budget: float,
+    algorithm,                      # AlgorithmSummary
+    qec_scheme,                     # QECScheme, e.g. QECScheme.make_beverland_et_al()
+    physical_error: float,
+    rotation_model,                 # needed for c_min
+    data_block_cls=FastDataBlock,   # swap for Compact/Intermediate/Simple as needed
+    d_max: int = 25,
+    fixed_point_iters: int = 5,
+    cost_fn=lambda total_qubits, duration_cycles: total_qubits * duration_cycles,  # spacetime volume
+):
+    distillation_budget = error_budget / 3
+
+    # The algorithm's own minimum runtime — the target the factories must keep pace with.
+    c_min = beverland_et_al_model.minimum_time_steps(
+        error_budget=error_budget, alg=algorithm, rotation_model=rotation_model
+    )
+
+    best = None  # (cost, factory, data_block, n_factories, time_steps, total_qubits, factory_err)
+
+    triples = [
+        (3 + 6*k, 1 + 2*k, 1 + 2*k)
+        for k in range(d_max)
+    ]
+
+    for d_x, d_z, d_m in triples:
+    # --- Outer loop: the only real search. No closed form exists for factory error
+    # (it comes from density-matrix simulation), so this has to be evaluated point by point. ---
+        try:
+            base = FifteenToOne(d_X=d_x, d_Z=d_z, d_m=d_m)
+        except AssertionError:
+            continue
+
+        # Error constraint (distillation gets its own 1/3 of the budget).
+        factory_err = base.factory_error(n_logical_gates, logical_error_model)
+        if factory_err > distillation_budget:
+            continue
+
+        # Solve directly for the minimum n_factories to keep pace with c_min.
+        single_cycles = base.n_cycles(n_logical_gates, logical_error_model)
+        n_factories = max(1, math.ceil(single_cycles / c_min))
+        factory = MultiFactory(base_factory=base, n_factories=n_factories)
+
+        # --- Inner step: closed-form data_d resolution, NOT a sweep. ---
+        # This is a fixed point because data_d depends on time_steps, and
+        # (for non-Simple data blocks) the data block's own cycle count
+        # depends on data_d. It converges in a couple of iterations since
+        # data_d only moves in discrete odd steps.
+        time_steps = factory.n_cycles(n_logical_gates, logical_error_model)
+        data_block = None
+        for _ in range(fixed_point_iters):
+            data_d = beverland_et_al_model.code_distance(
+                error_budget=error_budget,
+                time_steps=time_steps,
+                alg=algorithm,
+                qec_scheme=qec_scheme,
+                physical_error=physical_error,
+            )
+            data_block = data_block_cls(data_d=data_d)
+            new_time_steps = max(
+                factory.n_cycles(n_logical_gates, logical_error_model),
+                data_block.n_cycles(n_logical_gates, logical_error_model),
+            )
+            if new_time_steps == time_steps:
+                break
+            time_steps = new_time_steps
+        # --- end fixed point ---
+
+        total_qubits = factory.n_physical_qubits() + data_block.n_physical_qubits(
+            n_algo_qubits=algorithm.n_algo_qubits
+        )
+        cost = cost_fn(total_qubits, time_steps)
+
+        if best is None or cost < best[0]:
+            best = (cost, factory, data_block, n_factories, time_steps, total_qubits, factory_err)
+
+    if best is None:
+        raise ValueError(
+            f"No (d_X, d_Z, d_m) up to d_max={d_max} keeps factory_error under "
+            f"{distillation_budget:.3e}."
+        )
+
+    cost, factory, data_block, n_factories, time_steps, total_qubits, factory_err = best
+    return {
+        "factory": factory,
+        "data_block": data_block,
+        "n_factories": n_factories,
+        "time_steps": time_steps,
+        "total_qubits": total_qubits,
+        "factory_error": factory_err,
+        "cost": cost,
+        "dx": d_x,
+        "dz": d_z,
+        "dm": d_m,
+    }
 
 def _sweep_distances(cfg: QualtranConfig, algo, *, azure_params: Optional[Dict[str, Optional[int]]] = None) -> list:
     """
@@ -352,6 +487,7 @@ def _sweep_distances(cfg: QualtranConfig, algo, *, azure_params: Optional[Dict[s
     """
     from qualtran.surface_code import PhysicalCostModel
 
+    # Dead code (356-374): Azure's apply_azure_to_qualtran already does this
     # ── Determine which distances to sweep ───────────────────────────────
     if azure_params is not None and cfg.use_azure_parameters:
         azure_d = azure_params.get("code_distance")
@@ -390,7 +526,7 @@ def _sweep_distances(cfg: QualtranConfig, algo, *, azure_params: Optional[Dict[s
             m = _make_cost_model(cfg_d)
             rows.append({
                 "data_d":          d,
-                "n_factories":     cfg.n_factories,
+                "n_factories":     cfg_d.n_factories,
                 "model":           m,
                 "physical_qubits": m.n_phys_qubits(algo),
                 "duration_hr":     m.duration_hr(algo),
@@ -432,7 +568,7 @@ def compute_total_t_count(algo, eps_per_rotation: float) -> Tuple[int, float]:
     (t_total, ts_per_rotation)
     """
     from qualtran.surface_code import BeverlandEtAlRotationCost
-    ts_per_rotation = round(BeverlandEtAlRotationCost.rotation_cost(eps_per_rotation).t)
+    ts_per_rotation = BeverlandEtAlRotationCost.rotation_cost(eps_per_rotation).t
     t_total = int(algo.n_logical_gates.total_t_count(
         ts_per_toffoli=4, ts_per_cswap=4, ts_per_and_bloq=4,
         ts_per_rotation=ts_per_rotation,
@@ -574,23 +710,118 @@ def estimate(
     algo = AlgorithmSummary.from_bloq(bloq)
     gc = algo.n_logical_gates
 
-    # Physical cost model (or sweep)
-    rows = _sweep_distances(qt_cfg, algo)
-    valid_rows = [r for r in rows if not math.isnan(r["physical_qubits"])]
+    # ── Determine estimation path ─────────────────────────────────────────────
+    # optimize_factory=True: call optimize_factory_and_count() to jointly search
+    # over FifteenToOne factory dimensions (d_X, d_Z, d_m) and parallel factory
+    # count for minimum space-time volume.
+    #
+    # This is skipped — falling back to the sweep — when:
+    #   • use_azure_parameters=True  (Azure-override mode must remain unchanged)
+    #   • use_gidney_fowler=True     (CCZ2T factory, not FifteenToOne)
+    #   • factory_type != "15to1"    (factory type not compatible)
+    _use_factory_opt = (
+        qt_cfg.optimize_factory
+        and not qt_cfg.use_azure_parameters
+        and not qt_cfg.use_gidney_fowler
+        and (qt_cfg.use_beverland or qt_cfg.factory_type == "15to1")
+    )
+    # These track what was actually used (optimization may differ from config).
+    effective_n_factories = qt_cfg.n_factories
+    effective_factory_type = qt_cfg.factory_type
 
-    if not valid_rows:
-        raise RuntimeError("Qualtran returned no valid Pareto solutions.")
+    if _use_factory_opt:
+        # ── Optimization path ─────────────────────────────────────────────────
+        # Build QEC scheme, physical parameters, and logical error model from
+        # config, then call optimize_factory_and_count().  A PhysicalCostModel
+        # is constructed from the resulting (factory, data_block) pair so that
+        # duration_hr and error are computed by the same formulas as the sweep
+        # path, and the existing qubit-breakdown extraction code below works
+        # without modification.
+        from qualtran.surface_code import (
+            BeverlandEtAlRotationCost,
+            QECScheme,
+            PhysicalParameters,
+            PhysicalCostModel as _PCM,
+        )
 
-    # Sort by physical qubits (ascending = default pareto_index=0)
-    valid_rows.sort(key=lambda r: r["physical_qubits"] * r["duration_hr"])
-    idx = qt_cfg.pareto_index % len(rows)
-    best = valid_rows[idx]
+        if qt_cfg.use_beverland:
+            _qec_scheme = QECScheme.make_beverland_et_al()
+            # Mirror what _make_cost_model does: use the preset PhysicalParameters
+            # when phys_err matches the default, otherwise use the user's values.
+            _phys_params = (
+                PhysicalParameters.make_beverland_et_al()
+                if qt_cfg.phys_err == 1e-3
+                else PhysicalParameters(
+                    physical_error=qt_cfg.phys_err,
+                    cycle_time_us=qt_cfg.cycle_time_us,
+                )
+            )
+        else:
+            # Custom path: build QEC scheme from config string.
+            _qec_scheme = _make_qec_scheme(qt_cfg.qec_scheme)
+            _phys_params = PhysicalParameters(
+                physical_error=qt_cfg.phys_err, cycle_time_us=qt_cfg.cycle_time_us
+            )
 
-    model = best["model"]
-    phys_qubits = int(best["physical_qubits"])
-    duration_hr = best["duration_hr"]
-    error = best["error"]
-    data_d = best["data_d"]
+        _logical_error_model = LogicalErrorModel(
+            physical_error=qt_cfg.phys_err, qec_scheme=_qec_scheme
+        )
+
+        opt = optimize_factory_and_count(
+            n_logical_gates=gc,
+            logical_error_model=_logical_error_model,
+            error_budget=error_budget,
+            algorithm=algo,
+            qec_scheme=_qec_scheme,
+            physical_error=qt_cfg.phys_err,
+            rotation_model=BeverlandEtAlRotationCost,
+            data_block_cls=_get_data_block_cls(qt_cfg.data_block),
+            d_max=qt_cfg.optimize_factory_d_max,
+        )
+
+        # Build a PhysicalCostModel from the optimized components so that
+        # duration_hr and total error (factory + data block) are computed
+        # via the same internal formulas as the sweep path.
+        model = _PCM(
+            physical_params=_phys_params,
+            data_block=opt["data_block"],
+            factory=opt["factory"],
+            qec_scheme=_qec_scheme,
+        )
+        phys_qubits = opt["total_qubits"]
+        duration_hr = model.duration_hr(algo)
+        error = model.error(algo)
+        data_d = opt["data_block"].data_d
+        effective_n_factories = opt["n_factories"]
+        effective_factory_type = "FifteenToOne"
+        # Single-solution "Pareto" row for the extra dict
+        _pareto_rows: list = [{
+            "data_d":          data_d,
+            "n_factories":     effective_n_factories,
+            "physical_qubits": phys_qubits,
+            "duration_hr":     duration_hr,
+            "error":           error,
+        }]
+
+    else:
+        # ── Sweep path (existing behavior, preserved exactly) ─────────────────
+        rows = _sweep_distances(qt_cfg, algo)
+        valid_rows = [r for r in rows if not math.isnan(r["physical_qubits"])]
+
+        if not valid_rows:
+            raise RuntimeError("Qualtran returned no valid Pareto solutions.")
+
+        # Sort by physical qubits (ascending = default pareto_index=0)
+        valid_rows.sort(key=lambda r: r["physical_qubits"] * r["duration_hr"])
+        idx = qt_cfg.pareto_index % len(rows)
+        best = valid_rows[idx]
+
+        model = best["model"]
+        phys_qubits = int(best["physical_qubits"])
+        duration_hr = best["duration_hr"]
+        error = best["error"]
+        data_d = best["data_d"]
+        _pareto_rows = valid_rows
 
     # Phys qubit breakdown from the model (factory vs data block).
     # model.factory may be a MultiFactory (when qt_cfg.n_factories > 1), so
@@ -639,7 +870,7 @@ def estimate(
         cycle_time_us = model.physical_params.cycle_time_us
         if cycle_time_us > 0:
             logical_cycles = int(
-                round(duration_hr * 3600 * 1e6 / cycle_time_us)
+                duration_hr * 3600 * 1e6 / cycle_time_us
             ) / data_d
 
     # Circuit-derived T depth (DAG layer analysis on the transpiled Clifford+T circuit).
@@ -650,18 +881,21 @@ def estimate(
     # Factory statistics (best-effort; attributes vary across Qualtran versions)
     factory_stats = _extract_factory_stats(model)
 
-    # Factory description string (include total and per-factory for clarity)
-    factory_count_str = qt_cfg.factory_type
+    # Factory description string (include total and per-factory for clarity).
+    # Use effective_* values so the optimization path reports the actual
+    # factory type and count chosen by optimize_factory_and_count.
+    factory_count_str = effective_factory_type
     if factory_qubits is not None:
-        if qt_cfg.n_factories > 1:
+        if effective_n_factories > 1:
             factory_count_str = (
-                f"{qt_cfg.factory_type}×{qt_cfg.n_factories} ("
+                f"{effective_factory_type}×{effective_n_factories} ("
                 # f"{factory_qubits:,} total qubits; "
                 f"{qubits_per_factory:,} each)"
             )
         else:
-            factory_count_str = f"{qt_cfg.factory_type}×1 ({factory_qubits:,} qubits)"
+            factory_count_str = f"{effective_factory_type}×1 ({factory_qubits:,} qubits)"
 
+    factory_ds = opt["dx"], opt["dz"], opt["dm"] if _use_factory_opt else None
     return EstimationResult(
         estimator_name=f"Qualtran (d={data_d}, p={model.physical_params.physical_error:.0e})",
         logical_qubits=algo.n_algo_qubits,
@@ -690,9 +924,10 @@ def estimate(
         error_budget=qt_cfg.error_budget,
         logical_error_rate=float(error),
         code_distance=data_d,
-        factory_type=qt_cfg.factory_type,
+        factory_type=effective_factory_type,
+        factory_tuple=factory_ds,
         factory_count=factory_count_str,
-        num_factories=qt_cfg.n_factories,
+        num_factories=effective_n_factories,
         t_per_rotation=t_per_rotation,
         rotation_synthesis_precision=eps_per_rotation,
         synthesis_note=synthesis_note,
@@ -711,7 +946,7 @@ def estimate(
             f"t={config.evolution.evolution_time}"
         ),
         architecture_assumptions=(
-            f"{qt_cfg.factory_type} factory ×{qt_cfg.n_factories}; "
+            f"{effective_factory_type} factory ×{effective_n_factories}; "
             f"surface-code d={data_d}; "
             f"phys_err={model.physical_params.physical_error:.0e}; "
             f"cycle_time={model.physical_params.cycle_time_us} µs; "
@@ -733,7 +968,7 @@ def estimate(
             # per-factory footprint (before MultiFactory scaling) for debug output
             "qubits_per_factory": qubits_per_factory,
             "all_pareto_rows": [
-                {k: v for k, v in r.items() if k != "model"} for r in valid_rows
+                {k: v for k, v in r.items() if k != "model"} for r in _pareto_rows
             ],
             # ── Rotation synthesis diagnostics ───────────────────────────────
             "rot_count_from_pass1": rot_count,

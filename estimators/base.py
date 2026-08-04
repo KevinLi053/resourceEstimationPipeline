@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, runtime_checkable, Protocol
+from typing import Any, Dict, Optional, List, Tuple, runtime_checkable, Protocol
 
 from qiskit import QuantumCircuit
 
@@ -118,6 +118,9 @@ class EstimationResult:
     # ── Factory ──────────────────────────────────────────────────────────────
     factory_type: Optional[str] = None
     """Magic-state factory model name, e.g. 'Litinski19', 'CCZ2T'."""
+
+    factory_tuple: Tuple[int] = None
+    """Description of magic-state distillation tuple (factory_ds) (Qualtran only)"""
 
     factory_count: Optional[str] = None
     """Description of the magic-state factory configuration, e.g. '4×T'."""

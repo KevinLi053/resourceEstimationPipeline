@@ -464,45 +464,52 @@ def estimate(
     if az_cfg.code_distance is not None:
         sc_kwargs["distance"] = az_cfg.code_distance
 
-    # Derive qualtran's actual cycle_time_us from whichever preset path is active,
-    # so Azure uses the identical SurfaceCode code_cycle_override.
-    qt_cfg = config.qualtran
-    # Explicit override in config takes priority
-    effective_qt_cycle_us = (
-        qt_cfg.azure_cycle_time_us
-        if qt_cfg.azure_cycle_time_us is not None
-        else (
-            0.4  # Beverland preset: 4×50 + 2×100 = 400 ns
-            if qt_cfg.use_beverland
+    qt_cycle_ns: int | None = None
+
+    if az_cfg.use_qualtran_parameters:
+        # Derive qualtran's actual cycle_time_us from whichever preset path is active,
+        # so Azure uses the identical SurfaceCode code_cycle_override.
+        qt_cfg = config.qualtran
+        # Explicit override in config takes priority
+        effective_qt_cycle_us = (
+            qt_cfg.azure_cycle_time_us
+            if qt_cfg.azure_cycle_time_us is not None
             else (
-                1.0  # Gidney-Fowler preset: hardcoded in PhysicalParameters
-                if qt_cfg.use_gidney_fowler
-                else qt_cfg.cycle_time_us  # custom path — use config directly
+                0.4  # Beverland preset: 4×50 + 2×100 = 400 ns
+                if qt_cfg.use_beverland
+                else (
+                    1.0  # Gidney-Fowler preset: hardcoded in PhysicalParameters
+                    if qt_cfg.use_gidney_fowler
+                    else qt_cfg.cycle_time_us  # custom path — use config directly
+                )
             )
         )
-    )
 
-    # CRITICAL NOTE (QDK 1.30.0 bug): code_cycle_override MUST be passed to .q() as a kwarg,
-    # NOT to the SurfaceCode constructor.  When set on the constructor it is silently ignored
-    # and QDK falls back to the GateBased-derived default:
-    #   one_qubit_gate_depth*gate_time + two_qubit_gate_depth*two_q_gate_time + meas_time
-    # = 1*50 + 4*50 + 100 = 350 ns (with our defaults).
-    qt_cycle_ns = int(effective_qt_cycle_us * 1_000)
-    log.info(
-        "Azure QEC alignment: qualtran preset='%s' → effective cycle_time=%s µs → "
-        "code_cycle_override=%d ns",
-        "beverland" if qt_cfg.use_beverland else (
-            "gidney_fowler" if qt_cfg.use_gidney_fowler else "custom"
-        ),
-        effective_qt_cycle_us, qt_cycle_ns,
-    )
-    isa_query = SurfaceCode().q(**sc_kwargs, code_cycle_override=qt_cycle_ns) * _make_factory(az_cfg)
+        # CRITICAL NOTE (QDK 1.30.0 bug): code_cycle_override MUST be passed to .q() as a kwarg,
+        # NOT to the SurfaceCode constructor.  When set on the constructor it is silently ignored
+        # and QDK falls back to the GateBased-derived default:
+        #   one_qubit_gate_depth*gate_time + two_qubit_gate_depth*two_q_gate_time + meas_time
+        # = 1*50 + 4*50 + 100 = 350 ns (with our defaults).
+        qt_cycle_ns = int(effective_qt_cycle_us * 1_000)
+        log.info(
+            "Azure QEC alignment: qualtran preset='%s' → effective cycle_time=%s µs → "
+            "code_cycle_override=%d ns",
+            "beverland" if qt_cfg.use_beverland else (
+                "gidney_fowler" if qt_cfg.use_gidney_fowler else "custom"
+            ),
+            effective_qt_cycle_us, qt_cycle_ns,
+        )
+        isa_query = SurfaceCode().q(**sc_kwargs, code_cycle_override=qt_cycle_ns) * _make_factory(az_cfg)
+    else:
+        isa_query = SurfaceCode().q(**sc_kwargs) * _make_factory(az_cfg)
 
+    trace_query = PSSPC.q() * LatticeSurgery.q()
     # 5. Run
     result = _qre_estimate(
         app,
         arch,
         isa_query,
+        trace_query,
         max_error=az_cfg.error_budget,
         use_graph=az_cfg.use_graph,
     )
@@ -628,6 +635,51 @@ def estimate(
     # rotation_synthesis_precision: Azure uses budget-fraction allocation, not ε.
     _rz_eps: Optional[float] = None
 
+    arch_assumptions=(
+            f"GateBased error_rate={az_cfg.error_rate:.0e}; "
+            f"gate_time={az_cfg.gate_time_ns} ns; "
+            f"meas_time={az_cfg.measurement_time_ns} ns; "
+            f"two_qubit_gate_time={arch.two_qubit_gate_time} ns; "
+            f"SurfaceCode QEC d={code_dist}; "
+        )
+
+    if qt_cycle_ns is not None:
+        arch_assumptions += (
+            f"code_cycle_override={qt_cycle_ns} ns "
+            f"(from qualtran.cycle_time_us); "
+        )
+    arch_assumptions += (f"factory={az_cfg.factory_type}")
+
+    extra={
+            # All Pareto-optimal solutions from this run
+            "all_pareto_solutions": result.as_frame().to_dict("records"),
+            # QEC-encoded logical qubit counts (includes routing ancilla)
+            "logical_compute_qubits": log_compute,
+            "logical_memory_qubits": log_memory,
+            # Algorithmic memory qubits
+            "algorithm_memory_qubits": algo_memory,
+            # Timing detail
+            "evaluation_time_ns": eval_time_ns,
+            "single_shot_runtime_ns": single_shot_ns,
+            # Factory detail
+            "factory_runs": factory_info.get("factory_runs"),
+            "factory_states_per_run": factory_info.get("factory_states_per_run"),
+            "factory_error_rate": factory_info.get("factory_error_rate"),
+            # Total T states produced by the factory (PSSPC-transformed demand)
+            "t_state_count": factory_info.get("t_state_count"),
+            # ── Cross-estimator timing alignment (for debugging / verification) ──
+            "qt_cycle_time_us_injected": "Qualtran not used",
+            "qt_t_gate_ns": "Qualtran not used",
+            "qt_t_meas_ns": "Qualtran not used",
+    }
+
+    if az_cfg.use_qualtran_parameters:
+        extra.update({
+            "qt_cycle_time_us_injected": effective_qt_cycle_us,
+            "qt_t_gate_ns": config.qualtran.t_gate_ns,
+            "qt_t_meas_ns": config.qualtran.t_meas_ns,
+        })
+    
     return EstimationResult(
         estimator_name=(
             f"Azure QDK (err_rate={az_cfg.error_rate:.0e}, "
@@ -693,38 +745,9 @@ def estimate(
             f"reps={config.evolution.synthesis_reps}; "
             f"t={config.evolution.evolution_time}"
         ),
-        architecture_assumptions=(
-            f"GateBased error_rate={az_cfg.error_rate:.0e}; "
-            f"gate_time={az_cfg.gate_time_ns} ns; "
-            f"meas_time={az_cfg.measurement_time_ns} ns; "
-            f"two_qubit_gate_time={arch.two_qubit_gate_time} ns; "
-            f"SurfaceCode QEC d={code_dist}; "
-            f"code_cycle_override={qt_cycle_ns} ns (from qualtran.cycle_time_us) "
-            f"factory={az_cfg.factory_type}"
-        ),
+        architecture_assumptions=arch_assumptions,
 
         # ── Raw / extra ───────────────────────────────────────────────────────
         raw=result,
-        extra={
-            # All Pareto-optimal solutions from this run
-            "all_pareto_solutions": result.as_frame().to_dict("records"),
-            # QEC-encoded logical qubit counts (includes routing ancilla)
-            "logical_compute_qubits": log_compute,
-            "logical_memory_qubits": log_memory,
-            # Algorithmic memory qubits
-            "algorithm_memory_qubits": algo_memory,
-            # Timing detail
-            "evaluation_time_ns": eval_time_ns,
-            "single_shot_runtime_ns": single_shot_ns,
-            # Factory detail
-            "factory_runs": factory_info.get("factory_runs"),
-            "factory_states_per_run": factory_info.get("factory_states_per_run"),
-            "factory_error_rate": factory_info.get("factory_error_rate"),
-            # Total T states produced by the factory (PSSPC-transformed demand)
-            "t_state_count": factory_info.get("t_state_count"),
-            # ── Cross-estimator timing alignment (for debugging / verification) ──
-            "qt_cycle_time_us_injected": config.qualtran.cycle_time_us,
-            "qt_t_gate_ns": config.qualtran.t_gate_ns,
-            "qt_t_meas_ns": config.qualtran.t_meas_ns,
-        },
+        extra=extra,
     )

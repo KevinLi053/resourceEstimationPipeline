@@ -218,6 +218,17 @@ class AzureConfig:
     use_graph=False for more completeness on Pareto frontier
     """
 
+    use_qualtran_parameters: bool = False
+    """
+    When True, the Azure estimator will override its cycle time with
+    values extracted from Qualtran's PhysicalParams.  This enables
+    ``Mode 1: Qualtran-matched estimation`` — Azure uses Qualtrans's chosen
+    cycle time as fixed override input instead of its own sweep or defaults.
+
+    When False (default), Azure behaves normally with its own native
+    parameter selection, enabling ``Mode 2: Native Azure optimization``.
+    """
+
     minimize: str = "qubit_hours"
 
     # Estimation result selection
@@ -349,6 +360,41 @@ class QualtranConfig:
       * custom path                   → ``cycle_time_us``
 
     Set this explicitly to override the automatic derivation with a known value.
+    """
+
+    # Native factory optimization
+    optimize_factory: bool = False
+    """
+    When True (and use_azure_parameters=False, use_gidney_fowler=False), call
+    optimize_factory_and_count() instead of the fixed-distance sweep to jointly
+    optimize the FifteenToOne factory dimensions (d_X, d_Z, d_m) and the number
+    of parallel factories for minimum space-time volume.
+
+    Applies to:
+      - Qualtran native with use_beverland=True
+      - Qualtran native custom path when factory_type="15to1"
+
+    Silently skipped (falls back to sweep) when:
+      - use_azure_parameters=True  (Azure-override mode is unchanged)
+      - use_gidney_fowler=True     (CCZ2T factory, not FifteenToOne)
+      - factory_type != "15to1"    (CCZ2T or other factory)
+
+    Has no effect on Azure estimation; Azure QDK handles its own optimization.
+    """
+
+    optimize_factory_d_max: int = 15
+    """
+    Maximum FifteenToOne code distance to search during factory optimization.
+
+    optimize_factory_and_count() sweeps all (d_X, d_Z, d_m) up to this bound.
+    The search is O(d_max^3) and each combination calls FifteenToOne.factory_error()
+    which is computationally expensive (~0.09 s per point).
+    Practical guidance:
+      - d_max=9  : ~10 s — suitable for quick experiments
+      - d_max=15 : ~55 s — default, good balance of speed and coverage
+      - d_max=25 : ~4 min — full search, needed only for very high accuracy
+
+    Only used when optimize_factory=True.
     """
 
     # Result selection
