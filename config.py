@@ -397,6 +397,20 @@ class QualtranConfig:
     Only used when optimize_factory=True.
     """
 
+    # Error budget split (fraction allocated per component; must sum to <= 1.0)
+    rotation_error_budget_fraction: float = 1 / 3
+    """
+    Fraction of total ``error_budget`` reserved for rotation synthesis.
+    Default: ``1/3`` (Beverland et al. 2022, Eq. D3).
+
+    The remaining fraction is shared between factory and data block errors
+    by the optimizer — it finds the cheapest combination that satisfies
+    *total* error <= ``error_budget``.
+
+    Set to ``0`` when rotations have been pre-synthesised into T-gates so
+    no rotation budget needs to be reserved.
+    """
+
     # Result selection
     pareto_index: int = 0
     """

@@ -152,6 +152,8 @@ class EstimationResult:
     Computed as ``(error_budget / 3) / max(rotation_count, 1)`` so that the total
     rotation synthesis error stays within one-third of the algorithm budget."""
 
+    total_error: Optional[float] = None
+
     # ── Physical parameters (estimator hardware assumptions) ─────────────────
     physical_error_rate: Optional[float] = None
     """Physical gate error rate assumed by the estimator."""
