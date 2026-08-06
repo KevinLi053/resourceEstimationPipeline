@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, runtime_checkable, Protocol
+from typing import Any, Dict, Optional, List, Tuple, runtime_checkable, Protocol
 
 from qiskit import QuantumCircuit
 
@@ -119,6 +119,9 @@ class EstimationResult:
     factory_type: Optional[str] = None
     """Magic-state factory model name, e.g. 'Litinski19', 'CCZ2T'."""
 
+    factory_tuple: Tuple[int] = None
+    """Description of magic-state distillation tuple (factory_ds) (Qualtran only)"""
+
     factory_count: Optional[str] = None
     """Description of the magic-state factory configuration, e.g. '4×T'."""
 
@@ -148,6 +151,8 @@ class EstimationResult:
     """Per-rotation synthesis precision derived from the global error budget.
     Computed as ``(error_budget / 3) / max(rotation_count, 1)`` so that the total
     rotation synthesis error stays within one-third of the algorithm budget."""
+
+    total_error: Optional[float] = None
 
     # ── Physical parameters (estimator hardware assumptions) ─────────────────
     physical_error_rate: Optional[float] = None
