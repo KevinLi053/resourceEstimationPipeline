@@ -740,7 +740,9 @@ def estimate(
 
         # ── Assumptions ──────────────────────────────────────────────────────
         algorithm_assumptions=(
-            f"Clifford+T circuit; basis={config.transpile.basis_gates}; "
+            f"rotation_synthesis={'enabled' if config.transpile.rotation_synthesis_enabled else 'disabled'}; "
+            f"synthesis_method={config.transpile.synthesis_method if config.transpile.rotation_synthesis_enabled else 'N/A (passthrough)'}; "
+            f"basis={config.transpile.basis_gates}; "
             f"PauliEvolutionGate SuzukiTrotter order={config.evolution.synthesis_order} "
             f"reps={config.evolution.synthesis_reps}; "
             f"t={config.evolution.evolution_time}"

@@ -98,6 +98,12 @@ class EstimationResult:
     logical_error_rate: Optional[float] = None
     """Estimated total logical failure probability."""
 
+    rotation_error: Optional[float] = None
+
+    data_block_error: Optional[float] = None
+
+    factory_error: Optional[float] = None
+
     code_distance: Optional[int] = None
     """Surface-code data-block distance."""
 
@@ -265,12 +271,16 @@ class EstimationResult:
             # ── Error & QEC ───────────────────────────────────────────────────
             "Error budget": self.error_budget,
             "Logical error rate": self.logical_error_rate,
+            "Data error": self.data_block_error,
+            "Rotation synthesis error": self.rotation_error,
+            "Factory error": self.factory_error,
             "Code distance": self.code_distance,
             "Logical cycle time (ns)": self.logical_cycle_time_ns,
             "Code cycle time (ns)": self.code_cycle_time_ns,
 
             # ── Factory ───────────────────────────────────────────────────────
             "Factory type": self.factory_type,
+            "Factory tuple": self.factory_tuple,
             "Factory config": self.factory_count,
             "Number of factories": self.num_factories,
 

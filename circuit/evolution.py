@@ -49,6 +49,10 @@ def build_pauli_evolution_circuit(
     )
     qc = QuantumCircuit(hamiltonian.num_qubits)
     qc.append(gate, range(hamiltonian.num_qubits))
+
+    while any(hasattr(inst.operation, "definition") and inst.operation.definition is not None
+            for inst in qc.data):
+                qc = qc.decompose()
     return qc
 
 

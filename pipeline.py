@@ -36,6 +36,13 @@ from resourceEstimationPipeline.circuit.transpile import (
     circuit_to_qasm,
     transpile_to_clifford_t,
 )
+from resourceEstimationPipeline.circuit.cache import (
+    evolved_path as _evolved_cache_path,
+    final_circuit_path as _final_circuit_cache_path,
+    save_circuit as _cache_save,
+    load_circuit as _cache_load,
+    resolve_index as _resolve_key_index,
+)
 from resourceEstimationPipeline.estimators.base import EstimationResult
 from resourceEstimationPipeline.compare.metrics import ComparisonReport, compare
 
@@ -176,38 +183,112 @@ def run(
         print(f"[1/6] ERROR loading Hamiltonian: {exc}")
         return result
 
-    # ── Step 2: Build evolution circuit ──────────────────────────────────────
+    # ── Steps 2–3: Build / load evolution circuit, then synthesise to C+T ────
+    #
+    # Three-level cache:
+    #   1. bqskit_<idx>.qasm exists → load and skip both build and synthesis
+    #   2. evolved_<idx>.qasm exists → load raw circuit, run BQSKit, save result
+    #   3. Neither exists → build circuit, save evolved, run BQSKit, save result
     try:
-        result.raw_circuit = build_evolution_circuit(result.ham_data, config.evolution)
-        result.raw_stats = circuit_stats(result.raw_circuit.decompose())
-        print(
-            f"[2/6] Built PauliEvolutionGate circuit: "
-            f"depth={result.raw_stats['depth']}, "
-            f"gates={result.raw_stats['total_gates']}"
+        _idx = _resolve_key_index(config.hamlib)
+        _hdf5 = str(config.hamlib.hdf5_path)
+        _ev_path = _evolved_cache_path(_hdf5, _idx)
+
+        # Determine synthesis mode for cache key — must match transpile config.
+        _synth_enabled = (
+            config.transpile.rotation_synthesis_enabled
+            and config.transpile.synthesis_strategy != "passthrough"
         )
+        if not _synth_enabled:
+            _synth_mode = "passthrough"
+        else:
+            _synth_mode = config.transpile.synthesis_method.lower().strip()
+            if _synth_mode not in ("bqskit", "solovay_kitaev"):
+                _synth_mode = "bqskit"  # safe fallback
+
+        _final_path = _final_circuit_cache_path(_hdf5, _idx, _synth_mode)
     except Exception as exc:
-        result.errors["build_circuit"] = str(exc)
-        print(f"[2/6] ERROR building circuit: {exc}")
+        result.errors["cache_init"] = str(exc)
+        print(f"[2/6] ERROR resolving cache paths: {exc}")
         return result
 
-    # ── Step 3: Transpile to Clifford+T ──────────────────────────────────────
-    try:
-        result.clifford_t_circuit = transpile_to_clifford_t(
-            result.raw_circuit, config.transpile
-        )
-        result.ct_stats = circuit_stats(result.clifford_t_circuit)
-        result.qasm_source = circuit_to_qasm(result.clifford_t_circuit)
-        print(
-            f"[3/6] Transpiled to Clifford+T: "
-            f"depth={result.ct_stats['depth']}, "
-            f"T={result.ct_stats['t_count']}, "
-            f"Rz={result.ct_stats['rz_count']}, "
-            f"Clifford={result.ct_stats['clifford_count']}"
-        )
-    except Exception as exc:
-        result.errors["transpile"] = str(exc)
-        print(f"[3/6] ERROR transpiling: {exc}")
-        return result
+    _mode_label = (
+        "Clifford+T" if _synth_enabled
+        else "passthrough (rotations preserved)"
+    )
+
+    if _final_path.exists():
+        # ── Fast path: final circuit already cached ───────────────────────────
+        print(f"[2/6] Cache hit ({_synth_mode}) — skipping evolution and synthesis.")
+        try:
+            result.clifford_t_circuit = _cache_load(_final_path)
+            result.raw_stats = {}   # raw circuit not loaded in fast path
+            result.ct_stats = circuit_stats(result.clifford_t_circuit)
+            result.qasm_source = circuit_to_qasm(result.clifford_t_circuit)
+            print(
+                f"[3/6] (skipped — loaded from {_synth_mode} cache): "
+                f"depth={result.ct_stats['depth']}, "
+                f"T={result.ct_stats['t_count']}, "
+                f"Rz={result.ct_stats['rz_count']}, "
+                f"Clifford={result.ct_stats['clifford_count']}"
+            )
+        except Exception as exc:
+            result.errors["cache_load_final"] = str(exc)
+            print(f"[2/6] ERROR loading final circuit cache: {exc}")
+            return result
+
+    else:
+        # ── Step 2: Build or load evolved circuit ─────────────────────────────
+        if _ev_path.exists():
+            print(f"[2/6] Evolved cache hit — loading pre-built raw circuit.")
+            try:
+                result.raw_circuit = _cache_load(_ev_path)
+                result.raw_stats = circuit_stats(result.raw_circuit)
+                print(
+                    f"[2/6] Loaded evolved circuit: "
+                    f"depth={result.raw_stats['depth']}, "
+                    f"gates={result.raw_stats['total_gates']}"
+                )
+            except Exception as exc:
+                result.errors["cache_load_evolved"] = str(exc)
+                print(f"[2/6] ERROR loading evolved cache: {exc}")
+                return result
+        else:
+            try:
+                result.raw_circuit = build_evolution_circuit(result.ham_data, config.evolution)
+                result.raw_stats = circuit_stats(result.raw_circuit)
+                print(
+                    f"[2/6] Built PauliEvolutionGate circuit: "
+                    f"depth={result.raw_stats['depth']}, "
+                    f"gates={result.raw_stats['total_gates']}"
+                )
+                _cache_save(result.raw_circuit, _ev_path)
+                print(f"[2/6] Saved evolved circuit → {_ev_path}")
+            except Exception as exc:
+                result.errors["build_circuit"] = str(exc)
+                print(f"[2/6] ERROR building circuit: {exc}")
+                return result
+
+        # ── Step 3: Transpile / synthesize and cache the result ──────────────
+        try:
+            result.clifford_t_circuit = transpile_to_clifford_t(
+                result.raw_circuit, config.transpile
+            )
+            result.ct_stats = circuit_stats(result.clifford_t_circuit)
+            result.qasm_source = circuit_to_qasm(result.clifford_t_circuit)
+            print(
+                f"[3/6] Transpiled ({_mode_label}): "
+                f"depth={result.ct_stats['depth']}, "
+                f"T={result.ct_stats['t_count']}, "
+                f"Rz={result.ct_stats['rz_count']}, "
+                f"Clifford={result.ct_stats['clifford_count']}"
+            )
+            _cache_save(result.clifford_t_circuit, _final_path)
+            print(f"[3/6] Saved {_synth_mode} circuit → {_final_path}")
+        except Exception as exc:
+            result.errors["transpile"] = str(exc)
+            print(f"[3/6] ERROR transpiling: {exc}")
+            return result
 
     # ── Step 4: Azure QDK estimator ───────────────────────────────────────────
     if run_azure:

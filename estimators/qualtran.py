@@ -172,7 +172,7 @@ def qiskit_to_composite_bloq(circuit: QuantumCircuit, eps: float = 1e-11):
             bloq_cls = _ROTATION_BLOQS[name]
             # For Rx/Ry: add the rotation bloq directly (no special-angle
             # classification needed — let Qualtran's estimator handle them).
-            if name in ("rx", "ry"):
+            if name in ("rx", "ry", "rz"):
                 qs[idx[0]] = bb.add(bloq_cls(angle, eps=eps), q=qs[idx[0]])
             else:
                 # Rz: use _rz_to_bloqs to skip exact Clifford gates (e.g. T, S, Z)
@@ -790,6 +790,23 @@ def estimate(
     tmp_algo = AlgorithmSummary.from_bloq(tmp_bloq)
     rot_count = int(tmp_algo.n_logical_gates.rotation)
 
+    # When the circuit was pre-synthesized (rotation_synthesis_enabled=True) and
+    # no arbitrary rotations remain, set the effective fraction to 0 so the full
+    # error budget is available to the factory+data_block optimizer.
+    # rotation_fraction (from config) is preserved for display; effective_rotation_fraction
+    # is what is passed to optimize_factory_and_count and the sweep error decomposition.
+    _pre_synthesized = (
+        rot_count == 0 and config.transpile.rotation_synthesis_enabled
+        and config.transpile.synthesis_strategy != "passthrough"
+    )
+    effective_rotation_fraction = 0.0 if _pre_synthesized else rotation_fraction
+    if _pre_synthesized:
+        print(
+            "[qualtran] Pre-synthesized circuit detected (rot_count=0, synthesis=enabled). "
+            "Setting rotation error_budget_fraction=0 so the full error budget is "
+            "available for factory+data_block optimization."
+        )
+
     eps_per_rotation = eps_rot_global / max(rot_count, 1)
 
     # Pass 2: rebuild the bloq with the correct per-rotation precision.
@@ -866,7 +883,7 @@ def estimate(
             rotation_model=BeverlandEtAlRotationCost,
             data_block_cls=_get_data_block_cls(qt_cfg.data_block),
             d_max=qt_cfg.optimize_factory_d_max,
-            error_budget_fraction=rotation_fraction,
+            error_budget_fraction=effective_rotation_fraction,
             return_pareto=True,
         )
 
@@ -1075,6 +1092,9 @@ def estimate(
         # natively accept a budget — it takes code distance instead).
         error_budget=qt_cfg.error_budget,
         logical_error_rate=float(total_error),
+        rotation_error=rotation_err,
+        data_block_error=data_block_err,
+        factory_error=factory_err,
         code_distance=data_d,
         factory_type=effective_factory_type,
         factory_tuple=factory_ds,
@@ -1082,8 +1102,6 @@ def estimate(
         num_factories=effective_n_factories,
         t_per_rotation=t_per_rotation,
         rotation_synthesis_precision=eps_per_rotation,
-        # Total error across all three components (factory + data_block + rotation).
-        total_error=float(total_error),
         synthesis_note=synthesis_note,
         physical_error_rate=model.physical_params.physical_error,
         cycle_time_us=model.physical_params.cycle_time_us,
@@ -1093,8 +1111,11 @@ def estimate(
         gate_time_ns=qt_cfg.t_gate_ns if hasattr(qt_cfg, "t_gate_ns") else None,
         measurement_time_ns=qt_cfg.t_meas_ns if hasattr(qt_cfg, "t_meas_ns") else None,
         algorithm_assumptions=(
-            f"Clifford+T circuit; basis={config.transpile.basis_gates}; "
+            f"rotation_synthesis={'enabled' if config.transpile.rotation_synthesis_enabled else 'disabled'}; "
+            f"synthesis_method={config.transpile.synthesis_method if config.transpile.rotation_synthesis_enabled else 'N/A (passthrough)'}; "
+            f"basis={config.transpile.basis_gates}; "
             f"eps_per_rotation={eps_per_rotation:.2e} (derived from error_budget={error_budget:.0e}); "
+            f"rot_count={rot_count}; "
             f"PauliEvolutionGate SuzukiTrotter order={config.evolution.synthesis_order} "
             f"reps={config.evolution.synthesis_reps}; "
             f"t={config.evolution.evolution_time}"
