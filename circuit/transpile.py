@@ -7,31 +7,21 @@ Produces a single circuit suitable for both estimators:
 
 Transpilation pipeline (when rotation_synthesis_enabled=True)
 -------------------------------------------------------------
-Stage 1 — Decompose to intermediate basis
-    Expand high-level gates (e.g. PauliEvolutionGate) into an intermediate
-    gate set that still includes rotation gates (Rz/Rx/Ry).  No optimisation
-    runs yet so rotations are preserved for combining in stage 2.
+BQSKit path (default, synthesis_method="bqskit")
+    Compile the circuit holistically to Clifford+T using BQSKit's
+    CliffordTModel (from bqskit.ft).  This replaces the old staged Qiskit
+    pipeline (stages 1-3) with a single BQSKit compile call, followed by a
+    final Qiskit cleanup pass (stage 4) to normalise any residual gates.
 
-Stage 2 — Optimise with rotations in place
-    Run Qiskit optimisation passes (controlled by config.optimization_level)
-    while rotation gates still exist.  Consecutive rotations on the same
-    qubit can be merged/cancelled here before the expensive synthesis step.
-
-Stage 3 — Synthesise arbitrary rotations into Clifford+T
-    Replace every Rz/Rx/Ry gate with a Clifford+T approximation using
-    Qiskit's built-in synthesis.  Precision is controlled by
-    config.rotation_synthesis_epsilon.  After this stage no rotation gates
-    remain.
-
-Stage 4 — Final cleanup to pure Clifford+T
-    Run a lightweight transpile pass to normalise any residual non-Clifford+T
-    gates that Qiskit may have introduced during synthesis.  Validate that no
-    rotation gates remain.
+Legacy Qiskit path (synthesis_method="solovay_kitaev")
+    Stage 1 — Decompose to intermediate basis (rotations kept).
+    Stage 2 — Optimise with rotations in place.
+    Stage 3 — Synthesise Rz/Rx/Ry into Clifford+T via Solovay-Kitaev.
+    Stage 4 — Final cleanup to pure Clifford+T + validation.
 
 Public API
 ----------
 transpile_to_clifford_t(circuit, config) -> QuantumCircuit
-pre_synthesize_rz(circuit, epsilon) -> QuantumCircuit
 circuit_to_qasm(circuit) -> str
 circuit_stats(circuit) -> dict
 """
@@ -117,71 +107,66 @@ def _validate_no_rotations(circuit: QuantumCircuit) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Stage 3: rotation pre-synthesis
+# BQSKit synthesis (primary path)
 # ---------------------------------------------------------------------------
 
-def pre_synthesize_rz(
+def _synthesize_with_bqskit(circuit: QuantumCircuit) -> QuantumCircuit:
+    """
+    Compile a Qiskit circuit to Clifford+T using BQSKit FT.
+
+    Uses bqskit.ft.CliffordTModel with T and Tdg as the only non-Clifford
+    gates.  This replaces the old three-stage Qiskit rotation-synthesis
+    pipeline with a single holistic BQSKit compile call.
+
+    The output may contain SX (√X) gates; the Stage 4 Qiskit transpile pass
+    decomposes those into the pure Clifford+T basis.
+    """
+    try:
+        from bqskit import compile as bqskit_compile
+        from bqskit.ft import CliffordTModel
+        from bqskit.ft.cliffordt.cliffordtgates import t_gates
+        from bqskit.ext import qiskit_to_bqskit, bqskit_to_qiskit
+        from bqskit.ir.gates.constant.t import TGate
+        from bqskit.ir.gates.constant.tdg import TdgGate
+    except ImportError as exc:
+        raise ImportError(
+            "synthesis_method='bqskit' requires the 'bqskit' and 'bqskit-ft' packages. "
+            "Install with: pip install bqskit bqskit-ft"
+        ) from exc
+
+    log.info("[transpile/bqskit] Converting Qiskit circuit to BQSKit format.")
+    print("[transpile/bqskit] Converting to BQSKit format...")
+    bq_circuit = qiskit_to_bqskit(circuit)
+
+    log.info("[transpile/bqskit] Pre-compile gate counts: %s", bq_circuit.gate_counts)
+    print(f"[transpile/bqskit] Pre-compile gate counts: {bq_circuit.gate_counts}")
+
+    model = CliffordTModel(
+        num_qudits=bq_circuit.num_qudits,
+        non_clifford_gates=t_gates,
+    )
+
+    log.info("[transpile/bqskit] Compiling with CliffordTModel (BQSKit FT).")
+    print("[transpile/bqskit] Compiling with BQSKit CliffordTModel...")
+    ft_circuit = bqskit_compile(bq_circuit, model)
+
+    log.info("[transpile/bqskit] Post-compile gate set: %s", ft_circuit.gate_set)
+    print(f"[transpile/bqskit] Post-compile gate set: {ft_circuit.gate_set}")
+
+    return bqskit_to_qiskit(ft_circuit)
+
+
+# ---------------------------------------------------------------------------
+# Legacy Solovay-Kitaev rotation pre-synthesis
+# ---------------------------------------------------------------------------
+
+def _pre_synthesize_rz_solovay_kitaev(
     circuit: QuantumCircuit,
     epsilon: float = 1e-11,
-    synthesis_method: str = "solovay_kitaev",
 ) -> QuantumCircuit:
-    """
-    Decompose every arbitrary rotation gate into Clifford+T.
-
-    Iterates the circuit instruction-by-instruction and rebuilds a new
-    circuit, replacing each rotation gate with its synthesised Clifford+T
-    expansion in place.  Non-rotation gates are copied verbatim.
-
-    This function is now a thin dispatcher around :func:`rotation_synthesis.synthesize_rotation`.
-    The ``synthesis_method`` parameter selects which backend to use:
-
-    - ``"solovay_kitaev"`` (default) — uses Qiskit's Solovay-Kitaev pass.
-      **This is the existing path and its behaviour is identical to prior versions.**
-    - ``"pygridsynth"`` — uses pygridsynth for optimal or near-optimal exact
-      Clifford+T synthesis.  Requires ``pip install pygridsynth``.
-
-    Parameters
-    ----------
-    circuit : QuantumCircuit
-        May contain any mixture of Clifford+T and rotation gates.
-    epsilon : float
-        Approximation precision hint.  Interpretation depends on backend:
-        Solovay-Kitaev → upper bound on diamond-norm error per gate.
-        pygridsynth     → maximum distance from nearest Clifford+T grid point.
-    synthesis_method : str
-        Which synthesis algorithm to use (see above).
-
-    Returns
-    -------
-    QuantumCircuit
-        Equivalent circuit with all rotation gates replaced by Clifford+T
-        sequences.  Gate ordering is preserved.
-    """
-    # Import the unified dispatcher — lazy to avoid hard dependency.
+    """Synthesise rotation gates into Clifford+T using Solovay-Kitaev (legacy path)."""
     from .rotation_synthesis import synthesize_rotation as _synth
-
-    return _synth(circuit, synthesis_method=synthesis_method, epsilon=epsilon)
-
-
-def _make_sk_pass(epsilon: float):
-    """Return a SolovayKitaevDecomposition pass instance, or None if unavailable."""
-    try:
-        from qiskit.transpiler.passes import SolovayKitaevDecomposition
-        degree = _epsilon_to_sk_degree(epsilon)
-        return SolovayKitaevDecomposition(recursion_degree=degree)
-    except (ImportError, Exception):
-        return None
-
-
-def _epsilon_to_sk_degree(epsilon: float) -> int:
-    """Map approximation epsilon to a Solovay-Kitaev recursion degree."""
-    if epsilon >= 1e-2:
-        return 2
-    if epsilon >= 1e-4:
-        return 3
-    if epsilon >= 1e-7:
-        return 4
-    return 5
+    return _synth(circuit, synthesis_method="solovay_kitaev", epsilon=epsilon)
 
 
 # ---------------------------------------------------------------------------
@@ -222,61 +207,90 @@ def transpile_to_clifford_t(
     if not synthesis_enabled:
         # Passthrough: single-stage transpile, rotations pass through verbatim.
         log.info("[transpile] Passthrough mode: single-stage transpile.")
-        return transpile(
+        print("[transpile] Passthrough mode: preserving rotation gates (synthesis disabled).")
+        result = transpile(
             circuit,
             basis_gates=config.basis_gates,
             optimization_level=config.optimization_level,
             seed_transpiler=config.seed_transpiler,
         )
+        counts = _count_rotations(result)
+        _log_rotation_counts("Passthrough result (rotations preserved)", counts)
+        n_rots = sum(counts.values())
+        n_t = dict(result.count_ops()).get("t", 0) + dict(result.count_ops()).get("tdg", 0)
+        print(
+            f"[transpile] Passthrough done: "
+            f"rotation_gates={n_rots}  T_gates={n_t}  depth={result.depth()}"
+        )
+        if n_rots == 0:
+            log.warning(
+                "[transpile] Passthrough mode produced 0 rotation gates. "
+                "The input circuit may already be in a Clifford+T basis, or all "
+                "rotations were cancelled during optimization. This is expected only "
+                "if the Hamiltonian has no non-Clifford Trotter terms."
+            )
+            print(
+                "[transpile] WARNING: 0 rotation gates in passthrough output. "
+                "If you expected Rz gates, check basis_gates and optimization_level."
+            )
+        return result
 
-    # ── Stage 1: Decompose to intermediate basis (keeps rotation gates) ───────
-    log.info("[transpile] Stage 1: decompose to intermediate basis (rotations kept).")
-    print("[transpile] Stage 1: decomposing to intermediate basis...")
-    s1 = transpile(
-        circuit,
-        basis_gates=_INTERMEDIATE_BASIS,
-        optimization_level=0,       # no optimisation yet — just decompose
-        seed_transpiler=config.seed_transpiler,
-    )
+    method = config.synthesis_method.lower().strip()
 
-    # ── Stage 2: Optimise while rotations still exist ────────────────────────
-    log.info("[transpile] Stage 2: optimising with rotations in place (level=%d).",
-             config.optimization_level)
-    print(f"[transpile] Stage 2: optimising (level={config.optimization_level}) "
-          "with rotations in place...")
-    s2 = transpile(
-        s1,
-        basis_gates=_INTERMEDIATE_BASIS,
-        optimization_level=config.optimization_level,
-        seed_transpiler=config.seed_transpiler,
-    )
+    # ── BQSKit path (default) ─────────────────────────────────────────────────
+    if method == "bqskit":
+        log.info("[transpile] BQSKit path: compiling directly to Clifford+T.")
+        print("[transpile] BQSKit: compiling circuit to Clifford+T...")
+        s3 = _synthesize_with_bqskit(circuit)
 
-    # ── Stage 3: Synthesise arbitrary rotations into Clifford+T ──────────────
-    pre_counts = _count_rotations(s2)
-    _log_rotation_counts("Before synthesis", pre_counts)
+        post_counts = _count_rotations(s3)
+        _log_rotation_counts("After BQSKit synthesis", post_counts)
+        _print_gate_summary(s3)
 
-    log.info("[transpile] Stage 3: synthesising rotations into Clifford+T "
-             "(epsilon=%.2e, method=%s).", config.rotation_synthesis_epsilon,
-             config.synthesis_method)
-    print(f"[transpile] Stage 3: synthesising rotations "
-          f"(epsilon={config.rotation_synthesis_epsilon:.2e}, "
-          f"method={config.synthesis_method})...")
+    # ── Legacy Solovay-Kitaev path ────────────────────────────────────────────
+    elif method == "solovay_kitaev":
+        # Stage 1: Decompose to intermediate basis (keeps rotation gates).
+        log.info("[transpile] Stage 1: decompose to intermediate basis (rotations kept).")
+        print("[transpile] Stage 1: decomposing to intermediate basis...")
+        s1 = transpile(
+            circuit,
+            basis_gates=_INTERMEDIATE_BASIS,
+            optimization_level=0,
+            seed_transpiler=config.seed_transpiler,
+        )
 
-    # Resolve pygridsynth_precision → fallback to rotation_synthesis_epsilon.
-    syn_epsilon = (
-        config.pygridsynth_precision
-        if config.pygridsynth_precision is not None
-        else config.rotation_synthesis_epsilon
-    )
-    s3 = pre_synthesize_rz(
-        s2,
-        epsilon=syn_epsilon,
-        synthesis_method=config.synthesis_method,
-    )
+        # Stage 2: Optimise while rotations still exist.
+        log.info("[transpile] Stage 2: optimising with rotations in place (level=%d).",
+                 config.optimization_level)
+        print(f"[transpile] Stage 2: optimising (level={config.optimization_level}) "
+              "with rotations in place...")
+        s2 = transpile(
+            s1,
+            basis_gates=_INTERMEDIATE_BASIS,
+            optimization_level=config.optimization_level,
+            seed_transpiler=config.seed_transpiler,
+        )
 
-    post_counts = _count_rotations(s3)
-    _log_rotation_counts("After synthesis", post_counts)
-    _print_gate_summary(s3)
+        # Stage 3: Synthesise arbitrary rotations into Clifford+T.
+        pre_counts = _count_rotations(s2)
+        _log_rotation_counts("Before synthesis", pre_counts)
+
+        log.info("[transpile] Stage 3: synthesising rotations (epsilon=%.2e, method=solovay_kitaev).",
+                 config.rotation_synthesis_epsilon)
+        print(f"[transpile] Stage 3: synthesising rotations "
+              f"(epsilon={config.rotation_synthesis_epsilon:.2e}, method=solovay_kitaev)...")
+
+        s3 = _pre_synthesize_rz_solovay_kitaev(s2, epsilon=config.rotation_synthesis_epsilon)
+
+        post_counts = _count_rotations(s3)
+        _log_rotation_counts("After synthesis", post_counts)
+        _print_gate_summary(s3)
+
+    else:
+        raise ValueError(
+            f"Unknown synthesis_method '{config.synthesis_method}'. "
+            "Supported values: 'bqskit' (default), 'solovay_kitaev' (legacy)."
+        )
 
     # ── Stage 4: Final cleanup to pure Clifford+T + validation ───────────────
     log.info("[transpile] Stage 4: final cleanup to pure Clifford+T.")
@@ -284,7 +298,7 @@ def transpile_to_clifford_t(
     s4 = transpile(
         s3,
         basis_gates=_PURE_CLIFFORD_T_BASIS,
-        optimization_level=0,       # no further optimisation — just normalise
+        optimization_level=0,
         seed_transpiler=config.seed_transpiler,
     )
     _validate_no_rotations(s4)
@@ -374,7 +388,7 @@ def circuit_stats(circuit: QuantumCircuit) -> Dict[str, Any]:
     """
     ops = dict(circuit.count_ops())
     t_gates = {"t", "tdg"}
-    clifford_gates = {"h", "s", "sdg", "x", "y", "z", "cx", "cz", "swap", "ccx"}
+    clifford_gates = {"cx", "cz", "h", "s", "sdg", "sx", "swap", "x", "y", "z"}
     t_count = sum(ops.get(g, 0) for g in t_gates)
     clifford_count = sum(ops.get(g, 0) for g in clifford_gates)
     rotation_count = sum(ops.get(g, 0) for g in _ROTN_NAMES)

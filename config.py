@@ -55,26 +55,21 @@ class EvolutionConfig:
 # Keeps arbitrary rotation gates so they can be optimised (combined/cancelled)
 # before rotation synthesis runs.
 INTERMEDIATE_BASIS_GATES: List[str] = [
-    "cx", "rz", "rx", "ry", "h", "s", "sdg", "t", "tdg", "x", "y", "z",
+    "cx", "cz", "h", "s", "sdg", "sx", "swap", "x", "y", "z", "t", "tdg", "rz", "rx", "ry"
 ]
 
 # Pure Clifford+T basis — no arbitrary rotation gates.
 # This is the output basis after rotation synthesis and is what both estimators
 # receive.  Azure QDK and Qualtran are both able to process this gate set.
 PURE_CLIFFORD_T_BASIS_GATES: List[str] = [
-    "h", "s", "sdg", "t", "tdg", "cx", "x", "y", "z",
+    "cx", "cz", "h", "s", "sdg", "sx", "swap", "x", "y", "z", "t", "tdg"
 ]
 
 # Canonical Clifford+T basis accepted by both Azure QDK and Qualtran.
 # Kept for backward compatibility; includes rz so that passthrough mode
 # (rotation_synthesis_enabled=False) still works.
 CANONICAL_BASIS_GATES: List[str] = [
-    "cx", "rz", "h", "s", "sdg", "x", "y", "z", "t", "tdg",
-]
-
-# Qualtran can additionally accept these gates natively (superset).
-QUALTRAN_EXTENDED_BASIS_GATES: List[str] = CANONICAL_BASIS_GATES + [
-    "cz", "ccx", "swap",
+    "cx", "cz", "h", "s", "sdg", "sx", "swap", "x", "y", "z", "t", "tdg", "rz"
 ]
 
 
@@ -119,42 +114,35 @@ class TranspileConfig:
     Typical range: 1e-8 (fast, loose) to 1e-12 (slow, tight).
     """
 
-    synthesis_strategy: str = "qiskit_synth"
+    synthesis_strategy: str = "synth"
     """
     Legacy control kept for backward compatibility.
     Prefer ``rotation_synthesis_enabled`` for new code.
 
-    ``"qiskit_synth"`` → rotation_synthesis_enabled=True
+    ``"synth"`` → rotation_synthesis_enabled=True
     ``"passthrough"``  → rotation_synthesis_enabled=False
     """
 
-    synthesis_method: str = "solovay_kitaev"
+    synthesis_method: str = "bqskit"
     """
-    Which algorithm to use for synthesising arbitrary rotation gates into Clifford+T.
+    Which algorithm to use for synthesising the circuit into Clifford+T.
 
-    ``"solovay_kitaev"`` (default) — uses Qiskit's built-in Solovay-Kitaev
-        decomposition or its transpile-based fallback.  Works for all angles but
-        produces approximate decompositions with T-count scaling ~log^3(1/epsilon).
+    ``"bqskit"`` (default) — uses BQSKit + BQSKit-FT (CliffordTModel) to
+        compile the entire circuit holistically to Clifford+T.  This replaces
+        the old staged rotation-synthesis pipeline with a single BQSKit compile
+        call that typically produces better T-counts.  Requires the ``bqskit``
+        and ``bqskit-ft`` packages (already included in requirements.txt).
 
-    ``"pygridsynth"`` — uses the pygridsynth library for optimal or near-optimal
-        exact Clifford+T synthesis via grid-based lattice search.  For angles that
-        lie on the ``Z[1/2]`` Clifford+T grid (e.g. ``pi/4``, ``pi/8``, ``pi/6``)
-        it returns the **minimal** T-count.  Typically produces 2-10x fewer T gates
-        than Solovay-Kitaev for common angles.
+    ``"solovay_kitaev"`` (legacy) — uses Qiskit's built-in Solovay-Kitaev
+        decomposition.  Works without extra dependencies but produces
+        higher T-counts (~log^3(1/epsilon) per rotation).
 
-    Requires ``synthesis_method="pygridsynth"`` to also have ``rotation_synthesis_enabled=True``.
-    When synthesis is disabled (passthrough mode), this field is ignored.
+    When synthesis is disabled (passthrough mode or
+    ``rotation_synthesis_enabled=False``), this field is ignored.
     """
 
     pygridsynth_precision: Optional[float] = None
-    """
-    Dedicated approximation precision for the pygridsynth backend.
-
-    If ``None`` (default), falls back to ``rotation_synthesis_epsilon``.
-    Recommended range: 1e-8 (fast, near-optimal) to 1e-10 (optimal for exact grid points).
-
-    Only relevant when ``synthesis_method="pygridsynth"``.
-    """
+    """Deprecated — has no effect. pygridsynth has been removed; use synthesis_method='bqskit'."""
 
 
 # ---------------------------------------------------------------------------

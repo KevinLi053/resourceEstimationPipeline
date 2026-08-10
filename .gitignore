@@ -18,5 +18,7 @@ notebooks/comparison_test.ipynb
 **/qasm3_circuits/
 **/qasm_circuits/
 **/results/
-
+data
 pipeline.txt
+
+*.qasm
