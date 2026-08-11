@@ -62,14 +62,14 @@ INTERMEDIATE_BASIS_GATES: List[str] = [
 # This is the output basis after rotation synthesis and is what both estimators
 # receive.  Azure QDK and Qualtran are both able to process this gate set.
 PURE_CLIFFORD_T_BASIS_GATES: List[str] = [
-    "cx", "cz", "h", "s", "sdg", "sx", "swap", "x", "y", "z", "t", "tdg"
+    "cx", "cz", "h", "s", "sdg", "swap", "x", "y", "z", "t", "tdg"
 ]
 
 # Canonical Clifford+T basis accepted by both Azure QDK and Qualtran.
 # Kept for backward compatibility; includes rz so that passthrough mode
 # (rotation_synthesis_enabled=False) still works.
 CANONICAL_BASIS_GATES: List[str] = [
-    "cx", "cz", "h", "s", "sdg", "sx", "swap", "x", "y", "z", "t", "tdg", "rz"
+    "cx", "cz", "h", "s", "sdg", "swap", "x", "y", "z", "t", "tdg", "rz"
 ]
 
 

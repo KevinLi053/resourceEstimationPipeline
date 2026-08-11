@@ -36,60 +36,58 @@ from .base import EstimationResult
 
 # ---------------------------------------------------------------------------
 # Rz gate classification
-# (source: qualtranCircuitBuilder.ipynb — cell-bloq-helpers / _rz_to_bloqs)
-# (source: estimator/analysis/hamlib.ipynb — cell e6b886f8)
 # ---------------------------------------------------------------------------
 
-_TOL = 1e-12
+# _TOL = 1e-12
 
 
-def _rz_to_bloqs(angle: float, eps: float = 1e-11) -> list:
-    """
-    Classify Rz(angle) for Qualtran synthesis purposes.
+# def _rz_to_bloqs(angle: float, eps: float = 1e-11) -> list:
+#     """
+#     Classify Rz(angle) for Qualtran synthesis purposes.
 
-    Returns ``[Rz(angle, eps)]`` so the rotation remains in the bloq graph and
-    can be synthesized by Qualtran's resource estimator (rather than being
-    pre-decomposed into T-gates).
+#     Returns ``[Rz(angle, eps)]`` so the rotation remains in the bloq graph and
+#     can be synthesized by Qualtran's resource estimator (rather than being
+#     pre-decomposed into T-gates).
 
-    Special angles that are exact Clifford operations (π/2, π, etc.) return
-    their exact gates to avoid unnecessary synthesis overhead.  Exact zeros
-    return an empty list (identity — no bloq needed).
+#     Special angles that are exact Clifford operations (π/2, π, etc.) return
+#     their exact gates to avoid unnecessary synthesis overhead.  Exact zeros
+#     return an empty list (identity — no bloq needed).
 
-    Angle convention: Rz(θ) = exp(-iθ/2 · Z).
+#     Angle convention: Rz(θ) = exp(-iθ/2 · Z).
 
-    Parameters
-    ----------
-    angle : float  rotation angle in radians
-    eps   : float  synthesis precision for arbitrary rotations
+#     Parameters
+#     ----------
+#     angle : float  rotation angle in radians
+#     eps   : float  synthesis precision for arbitrary rotations
 
-    Returns
-    -------
-    list of Qualtran bloq objects (may be empty for identity)
-    """
-    from qualtran.bloqs.basic_gates import SGate, TGate, ZGate, Rz
+#     Returns
+#     -------
+#     list of Qualtran bloq objects (may be empty for identity)
+#     """
+#     from qualtran.bloqs.basic_gates import SGate, TGate, ZGate, Rz
 
-    angle = float(angle) % (2 * math.pi)
-    if angle > math.pi:
-        angle -= 2 * math.pi
+#     angle = float(angle) % (2 * math.pi)
+#     if angle > math.pi:
+#         angle -= 2 * math.pi
 
-    if abs(angle) < _TOL:
-        return []
-    if abs(angle - math.pi / 4) < _TOL:
-        return [TGate()]
-    if abs(angle + math.pi / 4) < _TOL:
-        return [TGate(is_adjoint=True)]
-    if abs(angle - math.pi / 2) < _TOL:
-        return [SGate()]
-    if abs(angle + math.pi / 2) < _TOL:
-        return [SGate(is_adjoint=True)]
-    if abs(abs(angle) - math.pi) < _TOL:
-        return [ZGate()]
-    if abs(angle - 3 * math.pi / 4) < _TOL:
-        return [SGate(), TGate()]
-    if abs(angle + 3 * math.pi / 4) < _TOL:
-        return [SGate(is_adjoint=True), TGate(is_adjoint=True)]
-    # All other angles → keep as an Rz bloq for Qualtran to synthesize.
-    return [Rz(angle, eps=eps)]
+#     if abs(angle) < _TOL:
+#         return []
+#     if abs(angle - math.pi / 4) < _TOL:
+#         return [TGate()]
+#     if abs(angle + math.pi / 4) < _TOL:
+#         return [TGate(is_adjoint=True)]
+#     if abs(angle - math.pi / 2) < _TOL:
+#         return [SGate()]
+#     if abs(angle + math.pi / 2) < _TOL:
+#         return [SGate(is_adjoint=True)]
+#     if abs(abs(angle) - math.pi) < _TOL:
+#         return [ZGate()]
+#     if abs(angle - 3 * math.pi / 4) < _TOL:
+#         return [SGate(), TGate()]
+#     if abs(angle + 3 * math.pi / 4) < _TOL:
+#         return [SGate(is_adjoint=True), TGate(is_adjoint=True)]
+#     # All other angles → keep as an Rz bloq for Qualtran to synthesize.
+#     return [Rz(angle, eps=eps)]
 
 
 # ---------------------------------------------------------------------------
@@ -100,16 +98,12 @@ def qiskit_to_composite_bloq(circuit: QuantumCircuit, eps: float = 1e-11):
     """
     Convert a Qiskit circuit to a Qualtran CompositeBloq.
 
-    Rotation gates (Rz, Rx, Ry) are added as Qualtran bloqs so that
+    Rotation gates (Rz) are added as Qualtran bloqs so that
     Qualtran's resource estimator can synthesize them natively (e.g. into
     T-gates) during estimation.  This supports the workflow where
     ``rotation_synthesis_enabled=False`` is set in the transpilation config,
     allowing pre-synthesis to be skipped and letting Qualtran handle rotation
     synthesis with its own algorithms.
-
-    Special Rz angles (multiples of π/4) are recognised as exact Clifford/T
-    gates — no synthesis overhead is incurred for those.  Arbitrary angles
-    become ``Rz(angle, eps)`` bloqs preserved for Qualtran's estimator.
 
     One named 1-qubit register per qubit (q0, q1, …) so the data-flow
     graph tracks each wire independently.
@@ -125,35 +119,25 @@ def qiskit_to_composite_bloq(circuit: QuantumCircuit, eps: float = 1e-11):
     """
     from qualtran import BloqBuilder
     from qualtran.bloqs.basic_gates import (
-        CNOT, CZ, Hadamard, MeasureZ, Rx, Rz, Ry, SGate, TGate, Toffoli,
+        CNOT, CZ, Hadamard, Rz, SGate, TGate,
         TwoBitSwap, XGate, YGate, ZGate,
     )
 
     _GATE_MAP = {
-        "t":     TGate(),
-        "tdg":   TGate(is_adjoint=True),
+        "cx":    CNOT(),
+        "cz":    CZ(),
         "h":     Hadamard(),
+        "s":     SGate(),
+        "sdg":   SGate(is_adjoint=True),
         "x":     XGate(),
         "y":     YGate(),
         "z":     ZGate(),
-        "s":     SGate(),
-        "sdg":   SGate(is_adjoint=True),
-        "cx":    CNOT(),
-        "cz":    CZ(),
-        "ccx":   Toffoli(),
         "swap":  TwoBitSwap(),
-        "measure": MeasureZ(),
-        # Rotation gates — stored as None so they are instantiated per
-        # instruction angle below.  Keeping them as Rz/Rx/Ry bloqs lets
-        # Qualtran's resource estimator synthesize them natively (e.g. into
-        # T-gates) during estimation rather than requiring pre-synthesis in
-        # the transpilation stage.
-        "rz":    None,
-        "rx":    None,
-        "ry":    None,
+        "t":     TGate(),
+        "tdg":   TGate(is_adjoint=True),
     }
 
-    _ROTATION_BLOQS = {"rz": Rz, "rx": Rx, "ry": Ry}
+    _ROTATION_BLOQS = {"rz": Rz}
     _IGNORED = {"barrier", "reset", "id", "measure"}
 
     n = circuit.num_qubits
@@ -169,38 +153,19 @@ def qiskit_to_composite_bloq(circuit: QuantumCircuit, eps: float = 1e-11):
 
         if name in _ROTATION_BLOQS:
             angle = instruction.operation.params[0]
-            bloq_cls = _ROTATION_BLOQS[name]
-            # For Rx/Ry: add the rotation bloq directly (no special-angle
-            # classification needed — let Qualtran's estimator handle them).
-            if name in ("rx", "ry", "rz"):
-                qs[idx[0]] = bb.add(bloq_cls(angle, eps=eps), q=qs[idx[0]])
-            else:
-                # Rz: use _rz_to_bloqs to skip exact Clifford gates (e.g. T, S, Z)
-                # at special angles, but keep arbitrary angles as Rz bloqs so
-                # Qualtran can synthesize them during resource estimation.
-                for rot_bloq in _rz_to_bloqs(angle, eps=eps):
-                    if isinstance(rot_bloq, Rz):
-                        qs[idx[0]] = bb.add(Rz(angle, eps=eps), q=qs[idx[0]])
-                    else:
-                        qs[idx[0]] = bb.add(rot_bloq, q=qs[idx[0]])
+            qs[idx[0]] = bb.add(_ROTATION_BLOQS[name](angle, eps=eps), q=qs[idx[0]])
 
-        elif name in _GATE_MAP and name not in ("cx", "cz", "swap", "ccx"):
+        elif name in _GATE_MAP and name not in ("cx", "cz", "swap"):
             qs[idx[0]] = bb.add(_GATE_MAP[name], q=qs[idx[0]])
 
         elif name == "cx":
-            qs[idx[0]], qs[idx[1]] = bb.add(CNOT(), ctrl=qs[idx[0]], target=qs[idx[1]])
+            qs[idx[0]], qs[idx[1]] = bb.add(_GATE_MAP[name], ctrl=qs[idx[0]], target=qs[idx[1]])
 
         elif name == "cz":
-            qs[idx[0]], qs[idx[1]] = bb.add(CZ(), q1=qs[idx[0]], q2=qs[idx[1]])
+            qs[idx[0]], qs[idx[1]] = bb.add(_GATE_MAP[name], q1=qs[idx[0]], q2=qs[idx[1]])
 
         elif name == "swap":
-            qs[idx[0]], qs[idx[1]] = bb.add(TwoBitSwap(), x=qs[idx[0]], y=qs[idx[1]])
-
-        elif name == "ccx":
-            ctrl_out, qs[idx[2]] = bb.add(
-                Toffoli(), ctrl=(qs[idx[0]], qs[idx[1]]), target=qs[idx[2]]
-            )
-            qs[idx[0]], qs[idx[1]] = ctrl_out
+            qs[idx[0]], qs[idx[1]] = bb.add(_GATE_MAP[name], x=qs[idx[0]], y=qs[idx[1]])
 
     return bb.finalize(**{f"q{i}": qs[i] for i in range(n)})
 

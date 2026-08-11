@@ -22,3 +22,4 @@ data
 pipeline.txt
 
 *.qasm
+third_party
