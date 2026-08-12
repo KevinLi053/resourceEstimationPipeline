@@ -445,6 +445,7 @@ def estimate(
         ALGORITHM_COMPUTE_QUBITS, ALGORITHM_MEMORY_QUBITS,
         LOGICAL_COMPUTE_QUBITS, LOGICAL_MEMORY_QUBITS,
         NUM_TS_PER_ROTATION, EVALUATION_TIME, RUNTIME_SINGLE_SHOT,
+        ROTATION_ERROR, DATA_ERROR, FACTORY_ERROR
     )
     from qdk.qre._trace import PSSPC, LatticeSurgery
 
@@ -550,6 +551,10 @@ def estimate(
 
     # T-gate synthesis rate per arbitrary Rz rotation (set by PSSPC transform)
     t_per_rot = _to_int_safe(props.get(NUM_TS_PER_ROTATION))
+
+    r_err = _to_float_safe(props.get(ROTATION_ERROR))
+    d_err = _to_float_safe(props.get(DATA_ERROR))
+    f_err = _to_float_safe(props.get(FACTORY_ERROR))
 
     # Miscellaneous timing properties
     eval_time_ns  = _to_int_safe(props.get(EVALUATION_TIME))
@@ -714,6 +719,9 @@ def estimate(
         error_budget=az_cfg.error_budget,
         # logical_error_rate = best.error (total logical failure probability)
         logical_error_rate=error_rate,
+        rotation_error=r_err,
+        data_block_error=d_err,
+        factory_error=f_err,
         code_distance=code_dist,
         # New QEC timing fields
         logical_cycle_time_ns=logical_cycle_time_ns,

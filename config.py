@@ -353,19 +353,19 @@ class QualtranConfig:
     # Native factory optimization
     optimize_factory: bool = False
     """
-    When True (and use_azure_parameters=False, use_gidney_fowler=False), call
-    optimize_factory_and_count() instead of the fixed-distance sweep to jointly
-    optimize the FifteenToOne factory dimensions (d_X, d_Z, d_m) and the number
-    of parallel factories for minimum space-time volume.
+    When True (and use_azure_parameters=False), call the appropriate factory
+    optimizer instead of the fixed-distance sweep:
+
+      - Gidney-Fowler / CCZ2T  → optimize_ccz2t() searches (l1_d, l2_d).
+      - Beverland / FifteenToOne → optimize_fifteen_to_one() searches (d_X, d_Z, d_m).
 
     Applies to:
-      - Qualtran native with use_beverland=True
-      - Qualtran native custom path when factory_type="15to1"
+      - use_beverland=True or factory_type="15to1"  (FifteenToOne optimizer)
+      - use_gidney_fowler=True or factory_type="ccz2t"  (CCZ2T optimizer)
 
     Silently skipped (falls back to sweep) when:
       - use_azure_parameters=True  (Azure-override mode is unchanged)
-      - use_gidney_fowler=True     (CCZ2T factory, not FifteenToOne)
-      - factory_type != "15to1"    (CCZ2T or other factory)
+      - factory_type not recognised as CCZ2T or FifteenToOne
 
     Has no effect on Azure estimation; Azure QDK handles its own optimization.
     """
@@ -374,7 +374,7 @@ class QualtranConfig:
     """
     Maximum FifteenToOne code distance to search during factory optimization.
 
-    optimize_factory_and_count() sweeps all (d_X, d_Z, d_m) up to this bound.
+    optimize_fifteen_to_one() sweeps all (d_X, d_Z, d_m) up to this bound.
     The search is O(d_max^3) and each combination calls FifteenToOne.factory_error()
     which is computationally expensive (~0.09 s per point).
     Practical guidance:
@@ -382,7 +382,8 @@ class QualtranConfig:
       - d_max=15 : ~55 s — default, good balance of speed and coverage
       - d_max=25 : ~4 min — full search, needed only for very high accuracy
 
-    Only used when optimize_factory=True.
+    Only used when optimize_factory=True and use_beverland or factory_type='15to1'.
+    (CCZ2T optimizer uses fixed search ranges d1 in [5,23], d2 in [d1+2,39].)
     """
 
     # Error budget split (fraction allocated per component; must sum to <= 1.0)

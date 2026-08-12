@@ -295,9 +295,10 @@ def _get_data_block_cls(db_type: str):
     """
     Return the DataBlock *class* (not an instance) for the given db_type string.
 
-    Used by optimize_factory_and_count, which takes ``data_block_cls`` as a
+    Used by optimize_fifteen_to_one, which takes ``data_block_cls`` as a
     callable of the form ``data_block_cls(data_d=...)`` rather than a pre-built
     instance.  Mirrors the instance factory in ``_make_data_block``.
+    (optimize_ccz2t delegates to Qualtran's grid search which always uses SimpleDataBlock.)
     """
     if db_type == "simple":
         from qualtran.surface_code import SimpleDataBlock
@@ -324,7 +325,7 @@ from qualtran.surface_code import beverland_et_al_model
 from qualtran.resource_counting import GateCounts
 
 
-def optimize_factory_and_count(
+def optimize_fifteen_to_one(
     *,
     n_logical_gates: GateCounts,
     logical_error_model: LogicalErrorModel,
@@ -332,7 +333,7 @@ def optimize_factory_and_count(
     algorithm,                      # AlgorithmSummary
     qec_scheme,                     # QECScheme, e.g. QECScheme.make_beverland_et_al()
     physical_error: float,
-    rotation_model,                 # needed for c_min
+    rotation_model,                 # needed for Beverland c_min formula
     data_block_cls=FastDataBlock,   # swap for Compact/Intermediate/Simple as needed
     d_max: int = 25,
     fixed_point_iters: int = 10,
@@ -341,7 +342,14 @@ def optimize_factory_and_count(
     return_pareto: bool = False,            # whether to return full Pareto front
 ):
     """
-    Jointly search over FifteenToOne factory dimensions and parallel count.
+    Beverland/FifteenToOne optimizer: jointly search over FifteenToOne factory
+    dimensions (d_X, d_Z, d_m) and parallel factory count for minimum cost.
+
+    This function is specific to the Beverland et al. model + FifteenToOne
+    factory.  It uses Beverland's minimum_time_steps() formula (Eq. D3) and
+    beverland_et_al_model.code_distance() to size the data block.
+
+    For the Gidney-Fowler/CCZ2T path use optimize_ccz2t() instead.
 
     Parameters
     ----------
@@ -403,7 +411,7 @@ def optimize_factory_and_count(
         time_steps = factory.n_cycles(n_logical_gates, logical_error_model)
         data_block = None
         for _ in range(fixed_point_iters):
-            data_d = beverland_et_al_model.code_distance(
+            data_d = qec_scheme.code_distance(
                 error_budget=remaining_budget,
                 time_steps=time_steps,
                 alg=algorithm,
@@ -510,6 +518,118 @@ def optimize_factory_and_count(
         "dm": d_m,
     }
 
+def optimize_ccz2t(
+    *,
+    n_logical_gates: GateCounts,
+    logical_error_model: LogicalErrorModel,
+    error_budget: float,
+    algorithm,                          # AlgorithmSummary
+    qec_scheme,                         # QECScheme — used for code_distance_from_budget
+    physical_error: float,
+    d1_min: int = 5,
+    d1_max: int = 25,
+    d2_max: int = 41,
+    cost_fn=lambda total_qubits, duration_cycles: total_qubits * duration_cycles,
+    error_budget_fraction: float = 1 / 3,   # rotation share of error_budget
+    return_pareto: bool = False,
+):
+    """
+    Gidney-Fowler/CCZ2T optimizer: iterates over factory configurations via
+    ``iter_ccz2t_factories`` and for each derives the data block code distance
+    analytically from the residual budget — the prescription from the
+    Gidney-Fowler paper (arXiv:1812.01238).
+
+    This avoids discretising data_d into a fixed grid (as ``get_ccz2t_costs_from_grid_search``
+    does) and avoids the backwards-compatible ``get_ccz2t_costs`` wrapper it uses internally.
+    For each factory configuration the optimal data_d satisfies:
+        data_d = code_distance_from_budget(
+            (remaining_budget − factory_err) / (n_tiles × n_cycles)
+        )
+
+    Differences from ``optimize_fifteen_to_one`` (Beverland/FifteenToOne):
+      - Loops over (l1_d, l2_d) pairs; data_d is derived analytically per pair.
+      - factory_error is from total_t_and_ccz_count() not total_t_count().
+      - SimpleDataBlock (n_steps_to_consume_a_magic_state=0) → factory-cycle-limited.
+      - Does NOT use beverland_et_al_model.minimum_time_steps() or code_distance().
+      - Returns distances as l1_d/l2_d instead of dx/dz/dm.
+
+    return_pareto=True returns a one-element list (single best solution).
+    """
+    from qualtran.surface_code import SimpleDataBlock
+    from qualtran.surface_code.gidney_fowler_model import iter_ccz2t_factories
+
+    # ── Budget split ─────────────────────────────────────────────────────────
+    rotation_budget = error_budget * error_budget_fraction
+    remaining_budget = error_budget * (1 - error_budget_fraction)
+
+    n_rotations = n_logical_gates.rotation
+    rotation_err = (
+        n_rotations * (rotation_budget / max(n_rotations, 1)) if n_rotations > 0 else 0.0
+    )
+
+    # ── Iterate over factory configurations ──────────────────────────────────
+    # iter_ccz2t_factories uses exclusive upper bounds: l1_stop = d1_max + 2
+    # yields l1_d in [d1_min, d1_max]; l2_stop = d2_max + 2 yields l2_d up to d2_max.
+    best = None
+    for factory in iter_ccz2t_factories(
+        l1_start=d1_min, l1_stop=d1_max + 2, l2_stop=d2_max + 2
+    ):
+        # ── Component metrics using our logical_error_model ───────────────────
+        factory_err = factory.factory_error(n_logical_gates, logical_error_model)
+        if factory_err > remaining_budget:
+            continue
+        # SimpleDataBlock: n_steps_to_consume_a_magic_state == 0 → total cycles = factory cycles.
+        time_steps = factory.n_cycles(n_logical_gates, logical_error_model)
+
+        # Replicate get_ccz2t_costs_from_error_budget's data_d derivation to access
+        # the data_block object for component error reporting.
+        # n_tiles = ceil(1.5 × n_algo_qubits)  (SimpleDataBlock, routing_overhead=0.5)
+        data_budget = remaining_budget - factory_err
+        if data_budget <= 0 or time_steps <= 0:
+            continue
+        n_tiles = math.ceil(1.5 * algorithm.n_algo_qubits)
+        data_d = qec_scheme.code_distance_from_budget(
+            physical_error=physical_error,
+            budget=data_budget / (n_tiles * time_steps),
+        )
+        data_block = SimpleDataBlock(data_d=data_d)
+
+        data_block_err = data_block.data_error(
+            n_algo_qubits=algorithm.n_algo_qubits,
+            n_cycles=time_steps,
+            logical_error_model=logical_error_model,
+        )
+        total_err = factory_err + data_block_err + rotation_err
+        total_qubits = factory.n_physical_qubits() + data_block.n_physical_qubits(
+            n_algo_qubits=algorithm.n_algo_qubits
+        )
+        cost = cost_fn(total_qubits, time_steps)
+
+        if best is None or cost < best["cost"]:
+            base_factory = getattr(factory, "base_factory", factory)
+            best = {
+                "factory":          factory,
+                "data_block":       data_block,
+                "n_factories":      getattr(factory, "n_factories", 1),
+                "time_steps":       time_steps,
+                "total_qubits":     total_qubits,
+                "factory_error":    factory_err,
+                "data_block_error": data_block_err,
+                "rotation_error":   rotation_err,
+                "total_error":      total_err,
+                "cost":             cost,
+                "l1_d":             base_factory.distillation_l1_d,
+                "l2_d":             base_factory.distillation_l2_d,
+            }
+
+    if best is None:
+        raise ValueError(
+            f"No (l1_d, l2_d) with l1 in [{d1_min},{d1_max}], l2 in [l1+2,{d2_max}] "
+            f"keeps factory+data error under {remaining_budget:.3e}."
+        )
+
+    return [best] if return_pareto else best
+
 def _sweep_distances(cfg: QualtranConfig, algo, *, azure_params: Optional[Dict[str, Optional[int]]] = None) -> list:
     """
     Sweep code distances and return list of (data_d, model, phys_qubits, duration_hr, error).
@@ -537,9 +657,6 @@ def _sweep_distances(cfg: QualtranConfig, algo, *, azure_params: Optional[Dict[s
     list[dict]
         One row per distance (or one row total when Azure fixed-distance is used).
     """
-    from qualtran.surface_code import PhysicalCostModel
-
-    # Dead code (356-374): Azure's apply_azure_to_qualtran already does this
     # ── Determine which distances to sweep ───────────────────────────────
     if azure_params is not None and cfg.use_azure_parameters:
         azure_d = azure_params.get("code_distance")
@@ -759,7 +876,7 @@ def estimate(
     # no arbitrary rotations remain, set the effective fraction to 0 so the full
     # error budget is available to the factory+data_block optimizer.
     # rotation_fraction (from config) is preserved for display; effective_rotation_fraction
-    # is what is passed to optimize_factory_and_count and the sweep error decomposition.
+    # is what is passed to the factory optimizer and the sweep error decomposition.
     _pre_synthesized = (
         rot_count == 0 and config.transpile.rotation_synthesis_enabled
         and config.transpile.synthesis_strategy != "passthrough"
@@ -782,19 +899,26 @@ def estimate(
     gc = algo.n_logical_gates
 
     # ── Determine estimation path ─────────────────────────────────────────────
-    # optimize_factory=True: call optimize_factory_and_count() to jointly search
-    # over FifteenToOne factory dimensions (d_X, d_Z, d_m) and parallel factory
-    # count for minimum space-time volume.
+    # optimize_factory=True: call the appropriate factory optimizer to jointly
+    # search over factory parameters and parallel count for minimum space-time.
     #
-    # This is skipped — falling back to the sweep — when:
+    #   Gidney-Fowler / CCZ2T  → optimize_ccz2t()
+    #   Beverland / FifteenToOne → optimize_fifteen_to_one()
+    #
+    # Falls back to the sweep when:
     #   • use_azure_parameters=True  (Azure-override mode must remain unchanged)
-    #   • use_gidney_fowler=True     (CCZ2T factory, not FifteenToOne)
-    #   • factory_type != "15to1"    (factory type not compatible)
+    #   • factory_type not recognised as CCZ2T or FifteenToOne
     _use_factory_opt = (
         qt_cfg.optimize_factory
         and not qt_cfg.use_azure_parameters
-        and not qt_cfg.use_gidney_fowler
-        and (qt_cfg.use_beverland or qt_cfg.factory_type == "15to1")
+        and ((qt_cfg.use_gidney_fowler or qt_cfg.factory_type == "ccz2t")
+        or (qt_cfg.use_beverland or qt_cfg.factory_type == "15to1"))
+    )
+    # Which sub-optimizer to use: CCZ2T (Gidney-Fowler) or FifteenToOne (Beverland).
+    _use_ccz2t_opt = _use_factory_opt and (
+        qt_cfg.use_gidney_fowler or (
+            not qt_cfg.use_beverland and qt_cfg.factory_type in ("CCZ2T", "ccz2t")
+        )
     )
     # These track what was actually used (optimization may differ from config).
     effective_n_factories = qt_cfg.n_factories
@@ -803,11 +927,10 @@ def estimate(
     if _use_factory_opt:
         # ── Optimization path ─────────────────────────────────────────────────
         # Build QEC scheme, physical parameters, and logical error model from
-        # config, then call optimize_factory_and_count().  A PhysicalCostModel
-        # is constructed from the resulting (factory, data_block) pair so that
-        # duration_hr and error are computed by the same formulas as the sweep
-        # path, and the existing qubit-breakdown extraction code below works
-        # without modification.
+        # config, then dispatch to the appropriate factory optimizer.
+        # A PhysicalCostModel is constructed from the resulting (factory,
+        # data_block) pair so that duration_hr and error are computed by the
+        # same formulas as the sweep path.
         from qualtran.surface_code import (
             BeverlandEtAlRotationCost,
             QECScheme,
@@ -827,6 +950,16 @@ def estimate(
                     cycle_time_us=qt_cfg.cycle_time_us,
                 )
             )
+        elif qt_cfg.use_gidney_fowler:
+            _qec_scheme = QECScheme.make_gidney_fowler()
+            _phys_params = (
+                PhysicalParameters.make_gidney_fowler()
+                if qt_cfg.phys_err == 1e-3
+                else PhysicalParameters(
+                    physical_error=qt_cfg.phys_err,
+                    cycle_time_us=qt_cfg.cycle_time_us,
+                )
+            )
         else:
             # Custom path: build QEC scheme from config string.
             _qec_scheme = _make_qec_scheme(qt_cfg.qec_scheme)
@@ -838,25 +971,42 @@ def estimate(
             physical_error=qt_cfg.phys_err, qec_scheme=_qec_scheme
         )
 
-        opt = optimize_factory_and_count(
-            n_logical_gates=gc,
-            logical_error_model=_logical_error_model,
-            error_budget=error_budget,
-            algorithm=algo,
-            qec_scheme=_qec_scheme,
-            physical_error=qt_cfg.phys_err,
-            rotation_model=BeverlandEtAlRotationCost,
-            data_block_cls=_get_data_block_cls(qt_cfg.data_block),
-            d_max=qt_cfg.optimize_factory_d_max,
-            error_budget_fraction=effective_rotation_fraction,
-            return_pareto=True,
-        )
+        # ── Dispatch to the model-specific optimizer ──────────────────────────
+        if _use_ccz2t_opt:
+            # Gidney-Fowler / CCZ2T path — uses l2_error() / total_t_and_ccz_count()
+            # and sizes the data block from the budget remaining after factory error.
+            opt = optimize_ccz2t(
+                n_logical_gates=gc,
+                logical_error_model=_logical_error_model,
+                error_budget=error_budget,
+                algorithm=algo,
+                qec_scheme=_qec_scheme,
+                physical_error=qt_cfg.phys_err,
+                error_budget_fraction=effective_rotation_fraction,
+                return_pareto=True,
+            )
+        else:
+            # Beverland / FifteenToOne path — uses beverland_et_al_model
+            # minimum_time_steps() and code_distance() for data block sizing.
+            opt = optimize_fifteen_to_one(
+                n_logical_gates=gc,
+                logical_error_model=_logical_error_model,
+                error_budget=error_budget,
+                algorithm=algo,
+                qec_scheme=_qec_scheme,
+                physical_error=qt_cfg.phys_err,
+                rotation_model=BeverlandEtAlRotationCost,
+                data_block_cls=_get_data_block_cls(qt_cfg.data_block),
+                d_max=qt_cfg.optimize_factory_d_max,
+                error_budget_fraction=effective_rotation_fraction,
+                return_pareto=True,
+            )
 
         # opt is now a Pareto front: list of dicts with component errors.
         if not opt:
             raise ValueError(
-                f"No (d_X, d_Z, d_m) up to d_max={qt_cfg.optimize_factory_d_max} "
-                f"keeps total_error under {error_budget:.3e}. Try a larger budget or d_max."
+                f"Factory optimizer found no solutions within error_budget={error_budget:.3e}. "
+                f"Try a larger budget or d_max."
             )
 
         # Build a PhysicalCostModel from the optimized components so that
@@ -874,7 +1024,7 @@ def estimate(
         error = model.error(algo)  # factory + data_block only (rotation excluded)
         data_d = opt[0]["data_block"].data_d
         effective_n_factories = opt[0]["n_factories"]
-        effective_factory_type = "FifteenToOne"
+        effective_factory_type = "CCZ2TFactory" if _use_ccz2t_opt else "FifteenToOne"
 
         # Convert Pareto front into _pareto_rows with all component errors.
         _pareto_rows: list = []
@@ -997,7 +1147,7 @@ def estimate(
 
     # Factory description string (include total and per-factory for clarity).
     # Use effective_* values so the optimization path reports the actual
-    # factory type and count chosen by optimize_factory_and_count.
+    # factory type and count chosen by the factory optimizer.
     factory_count_str = effective_factory_type
     if factory_qubits is not None:
         if effective_n_factories > 1:
@@ -1009,7 +1159,13 @@ def estimate(
         else:
             factory_count_str = f"{effective_factory_type}×1 ({factory_qubits:,} qubits)"
 
-    factory_ds = (opt[0]["dx"], opt[0]["dz"], opt[0]["dm"]) if _use_factory_opt else None
+    if _use_ccz2t_opt:
+        # CCZ2T factory distances: (l1_d, l2_d) instead of (dx, dz, dm).
+        factory_ds = (opt[0]["l1_d"], opt[0]["l2_d"])
+    elif _use_factory_opt:
+        factory_ds = (opt[0]["dx"], opt[0]["dz"], opt[0]["dm"])
+    else:
+        factory_ds = None
 
     # ── Compute component errors for the selected solution ───────────────
     if _use_factory_opt:
