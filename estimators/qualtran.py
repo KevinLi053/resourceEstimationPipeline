@@ -379,8 +379,13 @@ def optimize_fifteen_to_one(
 
     pareto: list[dict] = []   # only populated when return_pareto=True
 
+    # triples = [
+    #     (3 + 6*k, 1 + 2*k, 1 + 2*k)
+    #     for k in range(d_max)
+    # ]
+
     triples = [
-        (3 + 6*k, 1 + 2*k, 1 + 2*k)
+        (1 + 2*k, 1 + 2*k, 1 + 2*k)
         for k in range(d_max)
     ]
 
