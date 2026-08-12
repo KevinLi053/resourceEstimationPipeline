@@ -379,8 +379,13 @@ def optimize_fifteen_to_one(
 
     pareto: list[dict] = []   # only populated when return_pareto=True
 
+    # triples = [
+    #     (3 + 6*k, 1 + 2*k, 1 + 2*k)
+    #     for k in range(d_max)
+    # ]
+
     triples = [
-        (3 + 6*k, 1 + 2*k, 1 + 2*k)
+        (1 + 2*k, 1 + 2*k, 1 + 2*k)
         for k in range(d_max)
     ]
 
@@ -411,7 +416,7 @@ def optimize_fifteen_to_one(
         time_steps = factory.n_cycles(n_logical_gates, logical_error_model)
         data_block = None
         for _ in range(fixed_point_iters):
-            data_d = qec_scheme.code_distance(
+            data_d = beverland_et_al_model.code_distance(
                 error_budget=remaining_budget,
                 time_steps=time_steps,
                 alg=algorithm,
@@ -529,6 +534,7 @@ def optimize_ccz2t(
     d1_min: int = 5,
     d1_max: int = 25,
     d2_max: int = 41,
+    n_factories: int = 10,
     cost_fn=lambda total_qubits, duration_cycles: total_qubits * duration_cycles,
     error_budget_fraction: float = 1 / 3,   # rotation share of error_budget
     return_pareto: bool = False,
@@ -556,7 +562,8 @@ def optimize_ccz2t(
     return_pareto=True returns a one-element list (single best solution).
     """
     from qualtran.surface_code import SimpleDataBlock
-    from qualtran.surface_code.gidney_fowler_model import iter_ccz2t_factories
+    from qualtran.surface_code.gidney_fowler_model import iter_ccz2t_factories, get_ccz2t_costs_from_grid_search
+    from qualtran.surface_code.ccz2t_factory import CCZ2TFactory
 
     # ── Budget split ─────────────────────────────────────────────────────────
     rotation_budget = error_budget * error_budget_fraction
@@ -566,61 +573,51 @@ def optimize_ccz2t(
     rotation_err = (
         n_rotations * (rotation_budget / max(n_rotations, 1)) if n_rotations > 0 else 0.0
     )
-
-    # ── Iterate over factory configurations ──────────────────────────────────
-    # iter_ccz2t_factories uses exclusive upper bounds: l1_stop = d1_max + 2
-    # yields l1_d in [d1_min, d1_max]; l2_stop = d2_max + 2 yields l2_d up to d2_max.
     best = None
-    for factory in iter_ccz2t_factories(
-        l1_start=d1_min, l1_stop=d1_max + 2, l2_stop=d2_max + 2
-    ):
-        # ── Component metrics using our logical_error_model ───────────────────
-        factory_err = factory.factory_error(n_logical_gates, logical_error_model)
-        if factory_err > remaining_budget:
-            continue
-        # SimpleDataBlock: n_steps_to_consume_a_magic_state == 0 → total cycles = factory cycles.
-        time_steps = factory.n_cycles(n_logical_gates, logical_error_model)
-
-        # Replicate get_ccz2t_costs_from_error_budget's data_d derivation to access
-        # the data_block object for component error reporting.
-        # n_tiles = ceil(1.5 × n_algo_qubits)  (SimpleDataBlock, routing_overhead=0.5)
-        data_budget = remaining_budget - factory_err
-        if data_budget <= 0 or time_steps <= 0:
-            continue
-        n_tiles = math.ceil(1.5 * algorithm.n_algo_qubits)
-        data_d = qec_scheme.code_distance_from_budget(
-            physical_error=physical_error,
-            budget=data_budget / (n_tiles * time_steps),
+    for n_fac in range(1, n_factories+1):
+        factories = iter_ccz2t_factories(
+            n_factories=n_fac,
+            l1_start=d1_min,
+            l1_stop=d1_max,
+            l2_stop=d2_max,
         )
-        data_block = SimpleDataBlock(data_d=data_d)
+
+        cost, factory, data_block = get_ccz2t_costs_from_grid_search(
+            n_logical_gates=n_logical_gates,
+            n_algo_qubits=algorithm.n_algo_qubits,
+            phys_err=physical_error,
+            error_budget=remaining_budget,
+            factory_iter=factories,
+            cost_function=lambda pc: pc.qubit_hours,
+        )
+
+        time_steps = factory.n_cycles(n_logical_gates, logical_error_model)
+        total_qubits = factory.n_physical_qubits() + data_block.n_physical_qubits(n_algo_qubits=algorithm.n_algo_qubits)
+        factory_err = factory.factory_error(n_logical_gates, logical_error_model)
 
         data_block_err = data_block.data_error(
             n_algo_qubits=algorithm.n_algo_qubits,
             n_cycles=time_steps,
             logical_error_model=logical_error_model,
         )
-        total_err = factory_err + data_block_err + rotation_err
-        total_qubits = factory.n_physical_qubits() + data_block.n_physical_qubits(
-            n_algo_qubits=algorithm.n_algo_qubits
-        )
-        cost = cost_fn(total_qubits, time_steps)
 
-        if best is None or cost < best["cost"]:
-            base_factory = getattr(factory, "base_factory", factory)
-            best = {
-                "factory":          factory,
-                "data_block":       data_block,
-                "n_factories":      getattr(factory, "n_factories", 1),
-                "time_steps":       time_steps,
-                "total_qubits":     total_qubits,
-                "factory_error":    factory_err,
-                "data_block_error": data_block_err,
-                "rotation_error":   rotation_err,
-                "total_error":      total_err,
-                "cost":             cost,
-                "l1_d":             base_factory.distillation_l1_d,
-                "l2_d":             base_factory.distillation_l2_d,
-            }
+        total_err = rotation_err + data_block_err + factory_err
+        if best is None or cost.qubit_hours < best["cost"]:
+                base_factory = getattr(factory, "base_factory", factory)
+                best = {
+                    "factory":          factory,
+                    "data_block":       data_block,
+                    "n_factories":      n_fac,
+                    "time_steps":       time_steps,
+                    "total_qubits":     total_qubits,
+                    "factory_error":    factory_err,
+                    "data_block_error": data_block_err,
+                    "rotation_error":   rotation_err,
+                    "total_error":      total_err,
+                    "cost":             cost.qubit_hours,
+                    "l1_d":             base_factory.distillation_l1_d,
+                    "l2_d":             base_factory.distillation_l2_d,
+                }
 
     if best is None:
         raise ValueError(
@@ -983,6 +980,7 @@ def estimate(
                 qec_scheme=_qec_scheme,
                 physical_error=qt_cfg.phys_err,
                 error_budget_fraction=effective_rotation_fraction,
+                n_factories=qt_cfg.n_factories,
                 return_pareto=True,
             )
         else:
