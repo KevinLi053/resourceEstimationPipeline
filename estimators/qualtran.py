@@ -411,7 +411,7 @@ def optimize_fifteen_to_one(
         time_steps = factory.n_cycles(n_logical_gates, logical_error_model)
         data_block = None
         for _ in range(fixed_point_iters):
-            data_d = qec_scheme.code_distance(
+            data_d = beverland_et_al_model.code_distance(
                 error_budget=remaining_budget,
                 time_steps=time_steps,
                 alg=algorithm,
