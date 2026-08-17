@@ -1,4 +1,4 @@
 {
   "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
-  "python.analysis.extraPaths": ["..", "third_party/Qualtran"]
+  "python.analysis.extraPaths": ["..", "third_party/Qualtran", "third_party/qdk"]
 }

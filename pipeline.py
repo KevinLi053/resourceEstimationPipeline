@@ -145,6 +145,7 @@ def run(
     config: Optional[PipelineConfig] = None,
     run_azure: bool = True,
     run_qualtran: bool = True,
+    use_cache: bool = True,
 ) -> PipelineResult:
     """
     Execute the complete resource-estimation pipeline.
@@ -154,6 +155,8 @@ def run(
     config       : PipelineConfig. If None, uses DEFAULT_CONFIG.
     run_azure    : bool  whether to run the Azure QDK estimator.
     run_qualtran : bool  whether to run the Qualtran estimator.
+    use_cache    : bool  when False, always build and transpile fresh — never
+                         reads from or writes to the QASM circuit cache.
 
     Returns
     -------
@@ -217,7 +220,7 @@ def run(
         else "passthrough (rotations preserved)"
     )
 
-    if _final_path.exists():
+    if use_cache and _final_path.exists():
         # ── Fast path: final circuit already cached ───────────────────────────
         print(f"[2/6] Cache hit ({_synth_mode}) — skipping evolution and synthesis.")
         try:
@@ -239,7 +242,7 @@ def run(
 
     else:
         # ── Step 2: Build or load evolved circuit ─────────────────────────────
-        if _ev_path.exists():
+        if use_cache and _ev_path.exists():
             print(f"[2/6] Evolved cache hit — loading pre-built raw circuit.")
             try:
                 result.raw_circuit = _cache_load(_ev_path)
@@ -262,14 +265,15 @@ def run(
                     f"depth={result.raw_stats['depth']}, "
                     f"gates={result.raw_stats['total_gates']}"
                 )
-                _cache_save(result.raw_circuit, _ev_path)
-                print(f"[2/6] Saved evolved circuit → {_ev_path}")
+                if use_cache:
+                    _cache_save(result.raw_circuit, _ev_path)
+                    print(f"[2/6] Saved evolved circuit → {_ev_path}")
             except Exception as exc:
                 result.errors["build_circuit"] = str(exc)
                 print(f"[2/6] ERROR building circuit: {exc}")
                 return result
 
-        # ── Step 3: Transpile / synthesize and cache the result ──────────────
+        # ── Step 3: Transpile / synthesize ───────────────────────────────────
         try:
             result.clifford_t_circuit = transpile_to_clifford_t(
                 result.raw_circuit, config.transpile
@@ -283,8 +287,9 @@ def run(
                 f"Rz={result.ct_stats['rz_count']}, "
                 f"Clifford={result.ct_stats['clifford_count']}"
             )
-            _cache_save(result.clifford_t_circuit, _final_path)
-            print(f"[3/6] Saved {_synth_mode} circuit → {_final_path}")
+            if use_cache:
+                _cache_save(result.clifford_t_circuit, _final_path)
+                print(f"[3/6] Saved {_synth_mode} circuit → {_final_path}")
         except Exception as exc:
             result.errors["transpile"] = str(exc)
             print(f"[3/6] ERROR transpiling: {exc}")
