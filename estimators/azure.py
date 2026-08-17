@@ -89,7 +89,7 @@ def _make_factory(config: AzureConfig):
     """Construct the magic-state factory ISA query from config."""
     from qdk.qre.models import RoundBasedFactory, Litinski19Factory
 
-    factory_cls = Litinski19Factory if config.factory_type == "Litinski19" else RoundBasedFactory
+    factory_cls = Litinski19Factory if config.factory_type == "Litinski19" else RoundBasedFactory(use_cache=False)
 
     if len(config.slow_down_factors) == 1 and config.slow_down_factors[0] == 1.0:
         return factory_cls.q()

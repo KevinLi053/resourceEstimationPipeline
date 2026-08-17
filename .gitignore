@@ -23,3 +23,5 @@ pipeline.txt
 
 *.qasm
 third_party
+*.csv
+*.png

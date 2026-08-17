@@ -323,6 +323,7 @@ from qualtran.surface_code import (
 )
 from qualtran.surface_code import beverland_et_al_model
 from qualtran.resource_counting import GateCounts
+from .fifteen_to_one_two_round import FifteenToOneTwoRound, TwoRoundFactory
 
 
 def optimize_fifteen_to_one(
@@ -374,123 +375,176 @@ def optimize_fifteen_to_one(
         error_budget=remaining_budget, alg=algorithm, rotation_model=rotation_model
     )
 
-    best = None  # (cost, factory, data_block, n_factories, time_steps, total_qubits,
-                 #          factory_err, data_block_err, rotation_err, total_err, d_x, d_z, d_m)
-
-    pareto: list[dict] = []   # only populated when return_pareto=True
+    best: dict | None = None   # row dict of cheapest valid candidate found so far
+    pareto: list[dict] = []    # only populated when return_pareto=True
 
     triples = [
-        (3 + 6*k, 1 + 2*k, 1 + 2*k)
-        for k in range(1, d_max)
+        (1 + 2*k, 1 + 2*k, 1 + 2*k)
+        for k in range(d_max)
     ]
-
-    # triples = [
-    #     (1 + 2*k, 1 + 2*k, 1 + 2*k)
-    #     for k in range(1, d_max)
-    # ]
 
     n_rotations = n_logical_gates.rotation
     rotation_err = n_rotations * (rotation_budget / max(n_rotations, 1)) if n_rotations > 0 else 0.0
 
+    # ── Pass 1: always try two-round TwoRoundFactory ────────────────────
     for d_x, d_z, d_m in triples:
-    # --- Outer loop: the only real search. No closed form exists for factory error
-    # (it comes from density-matrix simulation), so this has to be evaluated point by point. ---
         try:
             base = FifteenToOne(d_X=d_x, d_Z=d_z, d_m=d_m)
         except AssertionError:
             continue
 
-        # Compute all three error components for this triple.
-        factory_err = base.factory_error(n_logical_gates, logical_error_model)
-
-        # Solve directly for the minimum n_factories to keep pace with c_min.
+        p1 = base.p_out(logical_error_model)
         single_cycles = base.n_cycles(n_logical_gates, logical_error_model)
-        n_factories = max(1, math.ceil(single_cycles / c_min))
-        factory = MultiFactory(base_factory=base, n_factories=n_factories)
+        n_fac_r1 = max(1, math.ceil(15 * single_cycles / c_min))
+        r1_mf = MultiFactory(base_factory=base, n_factories=n_fac_r1)
 
-        # --- Inner step: closed-form data_d resolution, NOT a sweep. ---
-        # This is a fixed point because data_d depends on time_steps, and
-        # (for non-Simple data blocks) the data block's own cycle count
-        # depends on data_d. It converges in a couple of iterations since
-        # data_d only moves in discrete odd steps.
-        time_steps = factory.n_cycles(n_logical_gates, logical_error_model)
-        data_block = None
-        for _ in range(fixed_point_iters):
-            data_d = beverland_et_al_model.code_distance(
-                error_budget=remaining_budget,
-                time_steps=time_steps,
-                alg=algorithm,
-                qec_scheme=qec_scheme,
-                physical_error=physical_error,
+        for d_x2, d_z2, d_m2 in triples:
+            try:
+                r2_base = FifteenToOneTwoRound(
+                    d_X=d_x2, d_Z=d_z2, d_m=d_m2, input_t_error=p1
+                )
+            except AssertionError:
+                continue
+
+            factory_err_2 = r2_base.factory_error(n_logical_gates, logical_error_model)
+
+            r2_single_cycles = r2_base.n_cycles(n_logical_gates, logical_error_model)
+            n_fac_r2 = max(1, math.ceil(r2_single_cycles / c_min))
+            r2_mf = MultiFactory(base_factory=r2_base, n_factories=n_fac_r2)
+
+            two_round = TwoRoundFactory(r1_factory=r1_mf, r2_factory=r2_mf)
+
+            time_steps_2 = two_round.n_cycles(n_logical_gates, logical_error_model)
+            data_block_2 = None
+            for _ in range(fixed_point_iters):
+                data_d_2 = beverland_et_al_model.code_distance(
+                    error_budget=remaining_budget,
+                    time_steps=time_steps_2,
+                    alg=algorithm,
+                    qec_scheme=qec_scheme,
+                    physical_error=physical_error,
+                )
+                data_block_2 = data_block_cls(data_d=data_d_2)
+                new_time_steps_2 = max(
+                    two_round.n_cycles(n_logical_gates, logical_error_model),
+                    data_block_2.n_cycles(n_logical_gates, logical_error_model),
+                )
+                if new_time_steps_2 == time_steps_2:
+                    break
+                time_steps_2 = new_time_steps_2
+
+            data_block_err_2 = data_block_2.data_error(
+                n_algo_qubits=algorithm.n_algo_qubits,
+                n_cycles=time_steps_2,
+                logical_error_model=logical_error_model,
             )
-            data_block = data_block_cls(data_d=data_d)
-            new_time_steps = max(
-                factory.n_cycles(n_logical_gates, logical_error_model),
-                data_block.n_cycles(n_logical_gates, logical_error_model),
+            total_err_2 = factory_err_2 + data_block_err_2 + rotation_err
+            if total_err_2 > error_budget:
+                continue
+
+            total_qubits_2 = two_round.n_physical_qubits() + data_block_2.n_physical_qubits(
+                n_algo_qubits=algorithm.n_algo_qubits
             )
-            if new_time_steps == time_steps:
-                break
-            time_steps = new_time_steps
-        # --- end fixed point ---
+            cost_2 = cost_fn(total_qubits_2, time_steps_2)
+            row = {
+                "factory": two_round,
+                "data_block": data_block_2,
+                "n_factories": n_fac_r2,
+                "n_fac_r1": n_fac_r1,
+                "time_steps": time_steps_2,
+                "total_qubits": total_qubits_2,
+                "factory_error": factory_err_2,
+                "data_block_error": data_block_err_2,
+                "rotation_error": rotation_err,
+                "total_error": total_err_2,
+                "cost": cost_2,
+                "dx": d_x, "dz": d_z, "dm": d_m,
+                "dx2": d_x2, "dz2": d_z2, "dm2": d_m2,
+                "two_round": True,
+            }
+            if return_pareto:
+                pareto.append(row)
+            if best is None or cost_2 < best["cost"]:
+                best = row
 
-        # Compute data block error using the converged distance.
-        data_block_err = data_block.data_error(
-            n_algo_qubits=algorithm.n_algo_qubits,
-            n_cycles=time_steps,
-            logical_error_model=logical_error_model,
-        )
+    # ── Pass 2: single-round fallback (only if two-round found nothing) ──
+    if best is None:
+        for d_x, d_z, d_m in triples:
+            try:
+                base = FifteenToOne(d_X=d_x, d_Z=d_z, d_m=d_m)
+            except AssertionError:
+                continue
 
-        total_err = factory_err + data_block_err + rotation_err
-        if total_err > error_budget:
-            continue
+            factory_err = base.factory_error(n_logical_gates, logical_error_model)
+            single_cycles = base.n_cycles(n_logical_gates, logical_error_model)
+            n_factories = max(1, math.ceil(single_cycles / c_min))
+            factory = MultiFactory(base_factory=base, n_factories=n_factories)
 
-        total_qubits = factory.n_physical_qubits() + data_block.n_physical_qubits(
-            n_algo_qubits=algorithm.n_algo_qubits
-        )
-        cost = cost_fn(total_qubits, time_steps)
+            time_steps = factory.n_cycles(n_logical_gates, logical_error_model)
+            data_block = None
+            for _ in range(fixed_point_iters):
+                data_d = beverland_et_al_model.code_distance(
+                    error_budget=remaining_budget,
+                    time_steps=time_steps,
+                    alg=algorithm,
+                    qec_scheme=qec_scheme,
+                    physical_error=physical_error,
+                )
+                data_block = data_block_cls(data_d=data_d)
+                new_time_steps = max(
+                    factory.n_cycles(n_logical_gates, logical_error_model),
+                    data_block.n_cycles(n_logical_gates, logical_error_model),
+                )
+                if new_time_steps == time_steps:
+                    break
+                time_steps = new_time_steps
 
-        row = {
-            "factory": factory,
-            "data_block": data_block,
-            "n_factories": n_factories,
-            "time_steps": time_steps,
-            "total_qubits": total_qubits,
-            "factory_error": factory_err,
-            "data_block_error": data_block_err,
-            "rotation_error": rotation_err,
-            "total_error": total_err,
-            "cost": cost,
-            "dx": d_x,
-            "dz": d_z,
-            "dm": d_m,
-        }
+            data_block_err = data_block.data_error(
+                n_algo_qubits=algorithm.n_algo_qubits,
+                n_cycles=time_steps,
+                logical_error_model=logical_error_model,
+            )
+            total_err = factory_err + data_block_err + rotation_err
 
-        if return_pareto:
-            pareto.append(row)
+            if total_err > error_budget:
+                continue
 
-        if best is None or cost < best[0]:
-            best = (cost, factory, data_block, n_factories, time_steps, total_qubits,
-                    factory_err, data_block_err, rotation_err, total_err, d_x, d_z, d_m)
+            total_qubits = factory.n_physical_qubits() + data_block.n_physical_qubits(
+                n_algo_qubits=algorithm.n_algo_qubits
+            )
+            cost = cost_fn(total_qubits, time_steps)
+            row = {
+                "factory": factory,
+                "data_block": data_block,
+                "n_factories": n_factories,
+                "time_steps": time_steps,
+                "total_qubits": total_qubits,
+                "factory_error": factory_err,
+                "data_block_error": data_block_err,
+                "rotation_error": rotation_err,
+                "total_error": total_err,
+                "cost": cost,
+                "dx": d_x, "dz": d_z, "dm": d_m,
+                "two_round": False,
+            }
+            if return_pareto:
+                pareto.append(row)
+            if best is None or cost < best["cost"]:
+                best = row
 
     if best is None:
         raise ValueError(
-            f"No (d_X, d_Z, d_m) up to d_max={d_max} keeps total_error under "
-            f"{error_budget:.3e} (factory {factory_err:.3e} + data_block 0 + rotation {rotation_err:.3e})."
+            f"No factory configuration up to d_max={d_max} satisfies "
+            f"error_budget={error_budget:.3e} (rotation_err={rotation_err:.3e})."
         )
-
-    cost, factory, data_block, n_factories, time_steps, total_qubits, \
-        factory_err, data_block_err, rotation_err, total_err, d_x, d_z, d_m = best
 
     if return_pareto:
         pareto_front = []
-
         for candidate in pareto:
             dominated = False
-
             for other in pareto:
                 if other is candidate:
                     continue
-
                 if (
                     other["total_qubits"] <= candidate["total_qubits"]
                     and other["time_steps"] <= candidate["time_steps"]
@@ -501,27 +555,11 @@ def optimize_fifteen_to_one(
                 ):
                     dominated = True
                     break
-
             if not dominated:
                 pareto_front.append(candidate)
-
         return pareto_front
 
-    return {
-        "factory": factory,
-        "data_block": data_block,
-        "n_factories": n_factories,
-        "time_steps": time_steps,
-        "total_qubits": total_qubits,
-        "factory_error": factory_err,
-        "data_block_error": data_block_err,
-        "rotation_error": rotation_err,
-        "total_error": total_err,
-        "cost": cost,
-        "dx": d_x,
-        "dz": d_z,
-        "dm": d_m,
-    }
+    return best
 
 def optimize_ccz2t(
     *,
