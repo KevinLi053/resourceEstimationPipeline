@@ -19,7 +19,7 @@ from __future__ import annotations
 import gc
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 
@@ -193,6 +193,7 @@ def run_multi_hamiltonian(
     run_qualtran: bool = True,
     out_dir: Optional[Path] = None,
     skip_cached: bool = True,
+    qualtran_estimator_fn: Optional[Callable] = None,
 ) -> pd.DataFrame:
     """
     Run Azure+Qualtran estimation for multiple HamLib Hamiltonians.
@@ -213,6 +214,11 @@ def run_multi_hamiltonian(
         - out_dir/all_comparisons.csv           combined summary
     skip_cached : bool
         Skip estimation when summary_<key>.csv already exists.
+    qualtran_estimator_fn : callable, optional
+        Custom Qualtran estimator with signature ``fn(circuit, config) -> EstimationResult``.
+        When provided, the standard ``qualtran.estimate`` is bypassed and this
+        function is called instead.  ``run_qualtran`` must still be True.
+        Defaults to None (uses the standard pipeline estimator).
 
     Returns
     -------
@@ -275,10 +281,27 @@ def run_multi_hamiltonian(
 
         # Run estimation (loads circuit + runs estimators)
         try:
-            pr = _pipeline.run(cfg, run_azure=run_azure, run_qualtran=run_qualtran)
+            _run_qt_in_pipeline = run_qualtran and (qualtran_estimator_fn is None)
+            pr = _pipeline.run(cfg, run_azure=run_azure, run_qualtran=_run_qt_in_pipeline)
         except Exception as exc:
             print(f"  ERROR (estimation): {exc}")
             continue
+
+        # Inject custom Qualtran estimator result if provided
+        if run_qualtran and qualtran_estimator_fn is not None:
+            if pr.clifford_t_circuit is not None:
+                try:
+                    pr.qualtran_result = qualtran_estimator_fn(pr.clifford_t_circuit, cfg)
+                    print(
+                        f"[5/6] Qualtran (custom): "
+                        f"phys_qubits={pr.qualtran_result.physical_qubits:,}, "
+                        f"runtime={pr.qualtran_result.runtime_seconds:.4f}s"
+                    )
+                except Exception as exc:
+                    pr.errors["qualtran_estimate"] = str(exc)
+                    print(f"[5/6] ERROR (Qualtran custom): {exc}")
+            else:
+                print("[5/6] Qualtran (custom) skipped — no circuit available.")
 
         rz_count = (pr.ct_stats or {}).get("rz_count", 0)
 
