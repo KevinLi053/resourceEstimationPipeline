@@ -1,10 +1,6 @@
 """
 Qualtran Resource Estimator adapter.
 
-Reuses implementations from:
-  - qualtranEstimator/qualtranCircuitBuilder.ipynb  (Steps 5–12)
-  - estimator/analysis/hamlib.ipynb                  (qiskit_to_composite_bloq)
-
 The public entry point is :func:`estimate`, which satisfies the
 :class:`~estimators.base.Estimator` protocol.
 
@@ -243,7 +239,6 @@ def _make_cost_model(cfg: QualtranConfig):
     """
     Build a Qualtran PhysicalCostModel from the pipeline configuration.
 
-    Source: qualtranCircuitBuilder.ipynb — cell-phys-estimate, cell-hw-sweep.
     When cfg.n_factories > 1, the base factory is wrapped in MultiFactory so
     that both qubit footprint and runtime scale correctly.
     """

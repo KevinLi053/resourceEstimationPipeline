@@ -40,11 +40,12 @@ git checkout "$QUALTRAN_COMMIT"
 # Install/build Qualtran
 python -m pip install -e "$QUALTRAN_DIR"
 
-# Build modified QDK
+# Build and install modified QDK
 cd "$QDK_DIR"
-
 maturin develop \
-    --manifest-path source/qdk_package/Cargo.toml \
-    --skip-install
+    --manifest-path source/qdk_package/Cargo.toml
+
+# Install this project in editable mode
+pip install -e "$ROOT"
 
 echo "Done!"

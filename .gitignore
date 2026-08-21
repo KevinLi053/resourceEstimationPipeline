@@ -23,3 +23,5 @@ third_party/Qualtran/
 *.qasm
 *.csv
 *.png
+
+*.egg-info

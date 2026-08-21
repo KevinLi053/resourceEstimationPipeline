@@ -225,8 +225,8 @@ def run_multi_hamiltonian(
     pd.DataFrame  (one row per estimator per Hamiltonian; includes 'group' column)
     """
     from ..config import HamlibConfig, PipelineConfig
-    from ..compare.metrics import compare as _compare, enrich_from_circuit
-    from ..compare.tables import comparison_dataframe as _comparison_dataframe
+    from .metrics import compare as _compare, enrich_from_circuit
+    from .tables import comparison_dataframe as _comparison_dataframe
 
     if out_dir is None:
         raise ValueError("out_dir is required — pass the experiment output directory.")
