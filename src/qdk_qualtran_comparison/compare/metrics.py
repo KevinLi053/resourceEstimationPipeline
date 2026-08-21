@@ -125,6 +125,14 @@ METRIC_DESCRIPTORS: List[Tuple[str, str, str]] = [
      "Physical memory qubits",
      "Physical qubits for logical memory (Azure only; not modelled by Qualtran)"),
 
+    # ── Logical resources ────────────────────────────────────────────────────
+    ("Logical compute qubits",
+     "Logical compute qubits",
+     "Total logical compute qubits"),
+    ("Total logical qubits",
+     "Total logical qubits",
+     "Total logical qubits (compute + memory)"),
+
     # ── Timing ────────────────────────────────────────────────────────────────
     ("Runtime (s)",
      "Runtime (s)",

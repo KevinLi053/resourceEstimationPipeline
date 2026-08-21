@@ -152,7 +152,6 @@ qsharp-widgets==1.29.1
 quimb==1.14.0
 referencing==0.37.0
 requests==2.34.2
--e git+https://github.com/KevinLi053/resourceEstimationPipeline.git@d5611c4f52d22a2b5b543cc039f75f680aefc93e#egg=resourceEstimationPipeline
 retrying==1.4.2
 rfc3339-validator==0.1.4
 rfc3986-validator==0.1.1

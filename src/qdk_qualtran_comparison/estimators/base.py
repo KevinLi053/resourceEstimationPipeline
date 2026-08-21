@@ -87,6 +87,11 @@ class EstimationResult:
     physical_memory_qubits: Optional[int] = None
     """Physical qubits used for logical memory (if reported)."""
 
+    # ── Logical resource counts ──────────────────────────────────────────────
+    logical_compute_qubits: Optional[int] = None
+    
+    total_logical_qubits: Optional[int] = None
+
     # ── Timing ───────────────────────────────────────────────────────────────
     runtime_seconds: Optional[float] = None
     """Estimated wall-clock runtime in seconds."""

@@ -1,10 +1,6 @@
 """
 Azure QDK Resource Estimator adapter.
 
-Reuses estimation logic from:
-  - estimator/circuitBuilderGeneralized.ipynb  (Steps 8–12)
-  - estimator/analysis/hamlib.ipynb             (qdk.qre usage)
-
 The public entry points are:
 
   - :func:`estimate` — runs Azure QDK resource estimation (satisfies the
@@ -421,8 +417,6 @@ def estimate(
     """
     Run the Microsoft QDK Resource Estimator on a Clifford+T circuit.
 
-    Source: estimator/circuitBuilderGeneralized.ipynb — Steps 8–12.
-
     The circuit is exported to OpenQASM 3 and passed to ``qdk.qre.estimate()``.
     The Pareto-optimal solution at ``config.azure.pareto_index`` is returned
     as an :class:`EstimationResult`.
@@ -711,6 +705,10 @@ def estimate(
         physical_compute_qubits=phys_compute,
         physical_factory_qubits=phys_factory,
         physical_memory_qubits=phys_memory,
+
+        # ── Logical resources ────────────────────────────────────────────────
+        logical_compute_qubits=LOGICAL_COMPUTE_QUBITS,
+        total_logical_qubits=LOGICAL_COMPUTE_QUBITS + LOGICAL_MEMORY_QUBITS,
 
         # ── Timing ───────────────────────────────────────────────────────────
         runtime_seconds=runtime_s,

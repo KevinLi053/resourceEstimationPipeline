@@ -28,23 +28,23 @@ log = logging.getLogger(__name__)
 
 from qiskit import QuantumCircuit
 
-from resourceEstimationPipeline.config import PipelineConfig
-from resourceEstimationPipeline.loaders.hamlib_loader import HamiltonianData, load_hamiltonian
-from resourceEstimationPipeline.circuit.evolution import build_evolution_circuit
-from resourceEstimationPipeline.circuit.transpile import (
+from qdk_qualtran_comparison.config import PipelineConfig
+from qdk_qualtran_comparison.loaders.hamlib_loader import HamiltonianData, load_hamiltonian
+from qdk_qualtran_comparison.circuit.evolution import build_evolution_circuit
+from qdk_qualtran_comparison.circuit.transpile import (
     circuit_stats,
     circuit_to_qasm,
     transpile_to_clifford_t,
 )
-from resourceEstimationPipeline.circuit.cache import (
+from qdk_qualtran_comparison.circuit.cache import (
     evolved_path as _evolved_cache_path,
     final_circuit_path as _final_circuit_cache_path,
     save_circuit as _cache_save,
     load_circuit as _cache_load,
     resolve_index as _resolve_key_index,
 )
-from resourceEstimationPipeline.estimators.base import EstimationResult
-from resourceEstimationPipeline.compare.metrics import ComparisonReport, compare
+from qdk_qualtran_comparison.estimators.base import EstimationResult
+from qdk_qualtran_comparison.compare.metrics import ComparisonReport, compare
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +103,7 @@ class PipelineResult:
 
     def print_summary(self) -> None:
         """Print a concise run summary to stdout."""
-        from resourceEstimationPipeline.compare.tables import print_comparison
+        from qdk_qualtran_comparison.compare.tables import print_comparison
 
         print("=" * 70)
         print("PIPELINE SUMMARY")
@@ -172,7 +172,7 @@ def run(
     6. Compare results.
     """
     if config is None:
-        from resourceEstimationPipeline.config import DEFAULT_CONFIG
+        from qdk_qualtran_comparison.config import DEFAULT_CONFIG
         config = DEFAULT_CONFIG
 
     result = PipelineResult(config=config)
@@ -298,7 +298,7 @@ def run(
     # ── Step 4: Azure QDK estimator ───────────────────────────────────────────
     if run_azure:
         try:
-            from resourceEstimationPipeline.estimators.azure import estimate as azure_estimate
+            from qdk_qualtran_comparison.estimators.azure import estimate as azure_estimate
             result.azure_result = azure_estimate(result.clifford_t_circuit, config)
             print(
                 f"[4/6] Azure QDK: "
@@ -322,7 +322,7 @@ def run(
             # and factory count instead of its own sweep/defaults.
             azure_params = None
             if run_azure and result.azure_result is not None:
-                from resourceEstimationPipeline.estimators.azure import (
+                from qdk_qualtran_comparison.estimators.azure import (
                     extract_azure_parameters as _extract_azure_params,
                 )
                 azure_params = _extract_azure_params(result.azure_result)
@@ -333,7 +333,7 @@ def run(
                     # Build a shallow copy of QualtranConfig with Azure overrides.
                     # This leaves the original config object untouched so other
                     # pipeline runs remain unaffected.
-                    from resourceEstimationPipeline.config import QualtranConfig
+                    from qdk_qualtran_comparison.config import QualtranConfig
 
                     az_overrides: dict = {}
                     if d is not None:
@@ -355,7 +355,7 @@ def run(
                         d, n,
                     )
 
-            from resourceEstimationPipeline.estimators.qualtran import estimate as qt_estimate
+            from qdk_qualtran_comparison.estimators.qualtran import estimate as qt_estimate
             result.qualtran_result = qt_estimate(result.clifford_t_circuit, config)
             print(
                 f"[5/6] Qualtran: "

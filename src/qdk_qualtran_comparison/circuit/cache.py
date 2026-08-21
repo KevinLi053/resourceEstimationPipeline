@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # data/ lives one level above this file's package directory
-# circuit/cache.py → circuit/ → resourceEstimationPipeline/ → data/
+# circuit/cache.py → circuit/ → qdk_qualtran_comparison/ → data/
 _DATA_ROOT: Path = Path(__file__).resolve().parent.parent / "data"
 
 

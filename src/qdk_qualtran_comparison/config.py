@@ -418,7 +418,7 @@ class PipelineConfig:
 
     Example usage
     -------------
-    >>> from resourceEstimationPipeline.config import PipelineConfig, HamlibConfig
+    >>> from qdk_qualtran_comparison.config import PipelineConfig, HamlibConfig
     >>> cfg = PipelineConfig(
     ...     hamlib=HamlibConfig(hdf5_path="path/to/heis.hdf5", key_index=10),
     ... )
